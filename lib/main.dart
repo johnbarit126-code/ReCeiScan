@@ -25,7 +25,8 @@ class ApiService {
 
   // Dapat PAREHO ng 'app_token' sa config.php ng server.
   // PALITAN ng bagong random na string (at ilagay din sa config.php).
-  static const String appToken = 'PALITAN_bagong_random_token';
+  static const String appToken =
+      '6ee116e2f51da1e8fcf4cd9678fe620008cffad500016c49';
 
   // Session token na galing sa login. Ipinapadala sa bawat tawag para
   // malaman ng server kung sino ang naka-login (hindi na ang user_id).
@@ -5859,6 +5860,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
   String period = 'All';
   String branchFilter = 'All'; // Owner lang
   bool selectMode = false;
+  bool deleting = false; // habang nagbubura
   final selected = <String>{};
 
   static const _periods = ['All', 'Today', 'This Week', 'This Month'];
@@ -5977,19 +5979,26 @@ class _TransactionsPageState extends State<TransactionsPage> {
       'Delete Selected',
       'Delete ${selected.length} selected transaction(s)?',
     );
-    if (!ok) return;
+    if (!ok || !mounted) return;
 
+    setState(() => deleting = true);
+    final total = selected.length;
     var failed = 0;
+    var firstError = '';
     try {
       for (final id in selected.toList()) {
         final res = await ApiService.deleteTransaction(
           userId: widget.store.currentUserId,
           transactionId: int.tryParse(id) ?? 0,
         );
-        if (res['success'] != true) failed++;
+        if (res['success'] != true) {
+          failed++;
+          if (firstError.isEmpty) firstError = res['message']?.toString() ?? '';
+        }
       }
     } catch (e) {
       if (!mounted) return;
+      setState(() => deleting = false);
       snack(context, 'Unable to reach the server. Delete was not completed.');
       await widget.store.syncTransactions();
       if (!mounted) return;
@@ -5998,12 +6007,21 @@ class _TransactionsPageState extends State<TransactionsPage> {
     }
 
     await widget.store.syncTransactions();
-    selected.clear();
-    selectMode = false;
     if (!mounted) return;
-    setState(() {});
-    if (failed > 0) {
-      snack(context, '$failed transaction(s) could not be deleted.');
+    setState(() {
+      deleting = false;
+      selected.clear();
+      selectMode = false;
+    });
+
+    if (failed == 0) {
+      snack(context, '$total transaction(s) deleted.');
+    } else {
+      snack(
+        context,
+        '$failed of $total could not be deleted'
+        '${firstError.isEmpty ? '.' : ': $firstError'}',
+      );
     }
   }
 
@@ -6322,6 +6340,18 @@ class _TransactionsPageState extends State<TransactionsPage> {
                         ),
                         if (canManage) ...[
                           const SizedBox(width: 8),
+                          // Kitang-kitang button para pumili ng buburahin
+                          IconButton.filledTonal(
+                            tooltip: selectMode
+                                ? 'Cancel selection'
+                                : 'Select to delete',
+                            onPressed: () => selectMode
+                                ? _exitSelectMode()
+                                : setState(() => selectMode = true),
+                            icon: Icon(
+                              selectMode ? Icons.close : Icons.checklist_rtl,
+                            ),
+                          ),
                           PopupMenuButton<String>(
                             icon: const Icon(Icons.more_vert),
                             onSelected: (v) {
@@ -6425,14 +6455,37 @@ class _TransactionsPageState extends State<TransactionsPage> {
                                     : 'Select all',
                               ),
                             ),
-                            IconButton(
-                              onPressed: selected.isEmpty
+                            FilledButton.icon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Colors.red,
+                                foregroundColor: Colors.white,
+                              ),
+                              onPressed: (selected.isEmpty || deleting)
                                   ? null
                                   : deleteSelected,
-                              icon: const Icon(Icons.delete_outline),
-                              color: Colors.red,
+                              icon: deleting
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white,
+                                      ),
+                                    )
+                                  : const Icon(Icons.delete_outline, size: 18),
+                              label: Text('Delete (${selected.length})'),
                             ),
                           ],
+                        ),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6, left: 4),
+                        child: Text(
+                          'Tap the receipts you want to delete.',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF6E86A4),
+                          ),
                         ),
                       ),
                     ],
