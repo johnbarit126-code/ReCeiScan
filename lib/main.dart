@@ -352,14 +352,17 @@ class ApiService {
   // ============================================================
   // DELETE ONE TRANSACTION
   // ============================================================
+  // Kasama ang reference number para iyon mismong resibo ang mabura
   static Future<Map<String, dynamic>> deleteTransaction({
     required int userId,
     required int transactionId,
+    String referenceNo = '',
   }) async {
     return await _post({
       'action': 'delete_transaction',
       'user_id': userId.toString(),
       'id': transactionId.toString(),
+      'reference_no': referenceNo,
     });
   }
 
@@ -1140,6 +1143,9 @@ class UserAccount {
   );
 }
 
+// Pang-dagdag sa id ng record na walang id (hal. lumang data sa phone)
+int _nextLocalId = 0;
+
 class TransactionRecord {
   String id;
   String accountName;
@@ -1195,24 +1201,26 @@ class TransactionRecord {
     'rawText': rawText,
   };
 
-  factory TransactionRecord.fromJson(
-    Map<String, dynamic> j,
-  ) => TransactionRecord(
-    id: j['id']?.toString() ?? DateTime.now().millisecondsSinceEpoch.toString(),
-    accountName: j['accountName'] ?? '',
-    reference: j['reference'] ?? '',
-    amount: (j['amount'] as num?)?.toDouble() ?? 0,
-    date: j['date'] ?? '',
-    time: j['time'] ?? '',
-    status: j['status'] ?? 'confirmed',
-    receiptType: j['receiptType'] ?? 'GCash',
-    rawText: j['rawText'] ?? '',
-    scannedBy: j['scannedBy']?.toString() ?? '',
-    senderNumber: j['senderNumber']?.toString() ?? '',
-    branch: j['branch']?.toString() ?? '',
-    hasImage: j['hasImage'] == true || j['hasImage'] == 1,
-    createdAt: j['createdAt']?.toString() ?? '',
-  );
+  factory TransactionRecord.fromJson(Map<String, dynamic> j) =>
+      TransactionRecord(
+        // Laging unique ang id (para isa-isa ang pagpili sa Transactions)
+        id: (j['id']?.toString() ?? '').trim().isNotEmpty
+            ? j['id'].toString()
+            : 'local-${j['reference'] ?? ''}-${_nextLocalId++}',
+        accountName: j['accountName'] ?? '',
+        reference: j['reference'] ?? '',
+        amount: (j['amount'] as num?)?.toDouble() ?? 0,
+        date: j['date'] ?? '',
+        time: j['time'] ?? '',
+        status: j['status'] ?? 'confirmed',
+        receiptType: j['receiptType'] ?? 'GCash',
+        rawText: j['rawText'] ?? '',
+        scannedBy: j['scannedBy']?.toString() ?? '',
+        senderNumber: j['senderNumber']?.toString() ?? '',
+        branch: j['branch']?.toString() ?? '',
+        hasImage: j['hasImage'] == true || j['hasImage'] == 1,
+        createdAt: j['createdAt']?.toString() ?? '',
+      );
 }
 
 class AttendanceRecord {
@@ -5955,9 +5963,15 @@ class _TransactionsPageState extends State<TransactionsPage> {
     return date;
   }
 
-  void _toggle(String id) {
+  // Natatanging susi ng BAWAT resibo sa pagpili. Hindi lang id ang gamit
+  // (kasama ang reference at oras), para kahit magkapareho ang id ng
+  // ilang resibo sa database, isa-isa pa rin ang pagpili.
+  String _k(TransactionRecord t) =>
+      '${t.id}|${t.reference}|${t.createdAt}|${t.amount}';
+
+  void _toggle(String key) {
     setState(() {
-      if (!selected.remove(id)) selected.add(id);
+      if (!selected.remove(key)) selected.add(key);
     });
   }
 
@@ -5986,10 +6000,16 @@ class _TransactionsPageState extends State<TransactionsPage> {
     var failed = 0;
     var firstError = '';
     try {
-      for (final id in selected.toList()) {
+      // Ang mga napiling resibo lang (ayon sa susi ng bawat isa)
+      final picked = widget.store
+          .getTransactions()
+          .where((t) => selected.contains(_k(t)))
+          .toList();
+      for (final t in picked) {
         final res = await ApiService.deleteTransaction(
           userId: widget.store.currentUserId,
-          transactionId: int.tryParse(id) ?? 0,
+          transactionId: int.tryParse(t.id) ?? 0,
+          referenceNo: t.reference,
         );
         if (res['success'] != true) {
           failed++;
@@ -6062,17 +6082,17 @@ class _TransactionsPageState extends State<TransactionsPage> {
       onLongPress: canManage
           ? () => setState(() {
               selectMode = true;
-              selected.add(t.id);
+              selected.add(_k(t));
             })
           : null,
       onTap: (canManage && selectMode)
-          ? () => _toggle(t.id)
+          ? () => _toggle(_k(t))
           : () => showTransactionDetail(context, widget.store.currentUserId, t),
       child: TransactionTile(
         t,
         showScanner: canManage,
-        selected: selected.contains(t.id),
-        onSelected: (canManage && selectMode) ? (_) => _toggle(t.id) : null,
+        selected: selected.contains(_k(t)),
+        onSelected: (canManage && selectMode) ? (_) => _toggle(_k(t)) : null,
       ),
     );
   }
@@ -6345,9 +6365,13 @@ class _TransactionsPageState extends State<TransactionsPage> {
                             tooltip: selectMode
                                 ? 'Cancel selection'
                                 : 'Select to delete',
+                            // Walang napipili sa simula; isa-isang pindutin
                             onPressed: () => selectMode
                                 ? _exitSelectMode()
-                                : setState(() => selectMode = true),
+                                : setState(() {
+                                    selected.clear();
+                                    selectMode = true;
+                                  }),
                             icon: Icon(
                               selectMode ? Icons.close : Icons.checklist_rtl,
                             ),
@@ -6356,7 +6380,10 @@ class _TransactionsPageState extends State<TransactionsPage> {
                             icon: const Icon(Icons.more_vert),
                             onSelected: (v) {
                               if (v == 'select') {
-                                setState(() => selectMode = true);
+                                setState(() {
+                                  selected.clear();
+                                  selectMode = true;
+                                });
                               } else if (v == 'delete_all') {
                                 deleteAll();
                               }
@@ -6436,23 +6463,38 @@ class _TransactionsPageState extends State<TransactionsPage> {
                                 ),
                               ),
                             ),
-                            TextButton(
-                              onPressed: () {
-                                setState(() {
-                                  if (selected.length == filtered.length) {
-                                    selected.clear();
-                                  } else {
-                                    selected
-                                      ..clear()
-                                      ..addAll(filtered.map((e) => e.id));
-                                  }
-                                });
-                              },
-                              child: Text(
-                                selected.length == filtered.length &&
-                                        filtered.isNotEmpty
-                                    ? 'Clear'
-                                    : 'Select all',
+                            // "All": pipiliin/aalisin LAHAT. Para isa-isa,
+                            // pindutin ang bawat resibo sa listahan.
+                            InkWell(
+                              borderRadius: BorderRadius.circular(8),
+                              onTap: filtered.isEmpty
+                                  ? null
+                                  : () => setState(() {
+                                      final allOn = filtered.every(
+                                        (e) => selected.contains(_k(e)),
+                                      );
+                                      if (allOn) {
+                                        selected.removeAll(filtered.map(_k));
+                                      } else {
+                                        selected.addAll(filtered.map(_k));
+                                      }
+                                    }),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IgnorePointer(
+                                    child: Checkbox(
+                                      value:
+                                          filtered.isNotEmpty &&
+                                          filtered.every(
+                                            (e) => selected.contains(_k(e)),
+                                          ),
+                                      onChanged: (_) {},
+                                    ),
+                                  ),
+                                  const Text('All'),
+                                  const SizedBox(width: 6),
+                                ],
                               ),
                             ),
                             FilledButton.icon(
@@ -6481,7 +6523,8 @@ class _TransactionsPageState extends State<TransactionsPage> {
                       const Padding(
                         padding: EdgeInsets.only(top: 6, left: 4),
                         child: Text(
-                          'Tap the receipts you want to delete.',
+                          'Tap each receipt you want to delete, '
+                          'or tick "All" to select everything.',
                           style: TextStyle(
                             fontSize: 12,
                             color: Color(0xFF6E86A4),
@@ -7676,6 +7719,12 @@ class _AttendanceEditDialogState extends State<AttendanceEditDialog> {
 
 // -----------------------------------------------------------------------------
 // REPORTS (Owner: lahat ng branch. Admin: branch niya lang)
+//   1. Pili ng saklaw: Daily (14 araw) / Monthly (12 buwan) / Yearly (5 taon)
+//   2. Total Received + pagbabago kumpara sa nakaraang araw/buwan/taon
+//   3. KPI: bilang ng resibo, average, pinakamataas, duplicates
+//   4. Bar chart (pindutin ang bar para makita ang detalye)
+//   5. Kada branch at Top scanners
+//   6. Duplicate Receipts at Daily Transaction Summary
 // -----------------------------------------------------------------------------
 
 class ReportsPage extends StatefulWidget {
@@ -7686,8 +7735,92 @@ class ReportsPage extends StatefulWidget {
   State<ReportsPage> createState() => _ReportsPageState();
 }
 
+// Kabuuan at bilang ng isang grupo ng resibo
+class _Agg {
+  double total = 0;
+  int count = 0;
+
+  void add(double amount) {
+    total += amount;
+    count++;
+  }
+}
+
 class _ReportsPageState extends State<ReportsPage> {
   ReceiScanStore get store => widget.store;
+
+  static const _ink = Color(0xFF0B1B33);
+  static const _sub = Color(0xFF6E86A4);
+  static const _blue = Color(0xFF0869EE);
+  static const _green = Color(0xFF07976F);
+  static const _red = Color(0xFFC62828);
+  static const _line = Color(0xFFE5EBF4);
+
+  static const _monthsShort = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+
+  // Daily / Monthly / Yearly
+  String overviewMode = 'Daily';
+
+  // Napiling branch sa Daily Transaction Summary ('All' = lahat)
+  String selectedBranch = 'All';
+
+  // Pinindot na bar sa chart (null = pinakabago)
+  String? _selectedBar;
+
+  // Mga branch ng Owner (galing sa server)
+  List<String> _branchNames = [];
+
+  // Mga pagtatangkang mag-duplicate (galing sa server)
+  List<Map<String, dynamic>> _dupRows = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBranchNames();
+    _loadDuplicates();
+  }
+
+  Future<void> _loadBranchNames() async {
+    try {
+      final rows = await ApiService.listBranches(userId: store.currentUserId);
+      if (!mounted) return;
+      setState(() {
+        _branchNames = [for (final r in rows) r['name'].toString()];
+      });
+    } catch (e) {
+      debugPrint('REPORT BRANCHES ERROR: $e');
+    }
+  }
+
+  Future<void> _loadDuplicates() async {
+    try {
+      final rows = await ApiService.getDuplicates(store.currentUserId);
+      if (!mounted) return;
+      setState(() => _dupRows = rows);
+    } catch (e) {
+      debugPrint('REPORT DUPLICATES ERROR: $e');
+    }
+  }
+
+  Future<void> _refresh() async {
+    await store.syncTransactions();
+    await _loadDuplicates();
+    if (!mounted) return;
+    setState(() {});
+  }
 
   // Branch ng naka-login na admin (galing sa server)
   String get _myBranch {
@@ -7699,328 +7832,590 @@ class _ReportsPageState extends State<ReportsPage> {
     return '';
   }
 
-  // Napiling branch sa Daily Transaction Summary ('All' = lahat)
-  String selectedBranch = 'All';
+  String _branchOf(TransactionRecord t) =>
+      t.branch.trim().isEmpty ? 'No Branch' : t.branch.trim();
 
-  // Transaction Overview: Daily / Monthly / Yearly
-  String overviewMode = 'Daily';
+  // ---------------------------------------------------------------
+  // SAKLAW NG PANAHON
+  // ---------------------------------------------------------------
 
-  // Maikling halaga para sa bar graph (1.2K, 3.4M)
+  // key ng bucket ayon sa napiling Daily / Monthly / Yearly
+  String _keyOf(String date) {
+    if (date.length < 4) return '';
+    if (overviewMode == 'Yearly') return date.substring(0, 4);
+    if (overviewMode == 'Monthly') {
+      return date.length >= 7 ? date.substring(0, 7) : '';
+    }
+    return date.length >= 10 ? date.substring(0, 10) : '';
+  }
+
+  // Mga bucket na ipapakita (pinakabago muna)
+  List<String> _bucketKeys() {
+    final now = DateTime.now();
+    if (overviewMode == 'Daily') {
+      return [
+        for (var i = 0; i < 14; i++)
+          dateKey(DateTime(now.year, now.month, now.day - i)),
+      ];
+    }
+    if (overviewMode == 'Monthly') {
+      return [
+        for (var i = 0; i < 12; i++)
+          () {
+            final d = DateTime(now.year, now.month - i, 1);
+            return '${d.year}-${d.month.toString().padLeft(2, '0')}';
+          }(),
+      ];
+    }
+    return [for (var i = 0; i < 5; i++) '${now.year - i}'];
+  }
+
+  // Mahabang pangalan ng bucket (hal. "Oct 25, 2026", "October 2026")
+  String _bucketLabel(String k) {
+    if (overviewMode == 'Yearly') return k;
+    final mo = int.tryParse(k.length >= 7 ? k.substring(5, 7) : '') ?? 1;
+    if (overviewMode == 'Monthly') {
+      return '${_monthsShort[mo - 1]} ${k.substring(0, 4)}';
+    }
+    final day = int.tryParse(k.length >= 10 ? k.substring(8, 10) : '') ?? 0;
+    final today = dateKey(DateTime.now());
+    if (k == today) return 'Today, ${_monthsShort[mo - 1]} $day';
+    return '${_monthsShort[mo - 1]} $day, ${k.substring(0, 4)}';
+  }
+
+  // Maikling label sa ilalim ng bawat bar
+  String _barLabel(String k) {
+    if (overviewMode == 'Yearly') return k;
+    final mo = int.tryParse(k.length >= 7 ? k.substring(5, 7) : '') ?? 1;
+    if (overviewMode == 'Monthly') return _monthsShort[mo - 1];
+    return '${int.tryParse(k.length >= 10 ? k.substring(8, 10) : '') ?? 0}';
+  }
+
+  String get _rangeText => overviewMode == 'Daily'
+      ? 'Last 14 days'
+      : overviewMode == 'Monthly'
+      ? 'Last 12 months'
+      : 'Last 5 years';
+
+  String get _compareText => overviewMode == 'Daily'
+      ? 'vs yesterday'
+      : overviewMode == 'Monthly'
+      ? 'vs last month'
+      : 'vs last year';
+
+  String get _currentText => overviewMode == 'Daily'
+      ? 'Today'
+      : overviewMode == 'Monthly'
+      ? 'This month'
+      : 'This year';
+
+  // Maikling halaga (1.2K, 3.4M)
   String _shortMoney(double v) {
     if (v >= 1000000) return '${(v / 1000000).toStringAsFixed(1)}M';
     if (v >= 1000) return '${(v / 1000).toStringAsFixed(1)}K';
     return v.toStringAsFixed(0);
   }
 
-  // Maikling label sa ilalim ng bawat bar
-  String _barLabel(String k) {
-    const m = [
-      'Jan',
-      'Feb',
-      'Mar',
-      'Apr',
-      'May',
-      'Jun',
-      'Jul',
-      'Aug',
-      'Sep',
-      'Oct',
-      'Nov',
-      'Dec',
-    ];
-    if (overviewMode == 'Yearly') return k;
-    if (overviewMode == 'Monthly' && k.length >= 7) {
-      final mo = int.tryParse(k.substring(5, 7)) ?? 1;
-      return m[mo - 1];
+  // ---------------------------------------------------------------
+  // MGA PIRASO NG UI
+  // ---------------------------------------------------------------
+
+  Widget _card({required Widget child, EdgeInsets? padding}) {
+    return Container(
+      width: double.infinity,
+      padding: padding ?? const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(color: _line),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: .04),
+            blurRadius: 24,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+
+  Widget _cardTitle(String title, {String? subtitle, Widget? trailing}) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                  color: _ink,
+                ),
+              ),
+              if (subtitle != null) ...[
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: const TextStyle(fontSize: 12.5, color: _sub),
+                ),
+              ],
+            ],
+          ),
+        ),
+        ?trailing,
+      ],
+    );
+  }
+
+  // Pagbabago (pataas = berde, pababa = pula)
+  Widget _changeChip(double now, double before, {bool onDark = false}) {
+    String text;
+    IconData icon;
+    Color fg;
+
+    if (before <= 0 && now <= 0) {
+      text = 'No change';
+      icon = Icons.remove;
+      fg = onDark ? Colors.white70 : _sub;
+    } else if (before <= 0) {
+      text = 'New';
+      icon = Icons.trending_up;
+      fg = onDark ? Colors.white : _green;
+    } else {
+      final pct = (now - before) / before * 100;
+      final up = pct >= 0;
+      text = '${up ? '+' : ''}${pct.toStringAsFixed(pct.abs() >= 10 ? 0 : 1)}%';
+      icon = up ? Icons.trending_up : Icons.trending_down;
+      fg = onDark ? Colors.white : (up ? _green : _red);
     }
-    if (k.length >= 10) {
-      return '${m[(int.tryParse(k.substring(5, 7)) ?? 1) - 1]}\n'
-          '${int.tryParse(k.substring(8, 10)) ?? 0}';
-    }
-    return k;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: onDark
+            ? Colors.white.withValues(alpha: .18)
+            : fg.withValues(alpha: .10),
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: fg),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: TextStyle(
+              color: fg,
+              fontWeight: FontWeight.w800,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   // ---------------------------------------------------------------
-  // TRANSACTION OVERVIEW: magkano ang pumapasok kada araw, buwan at taon,
-  // hiwalay kada branch.
+  // 1. PILI NG SAKLAW
   // ---------------------------------------------------------------
-  Widget _overviewCard(List<TransactionRecord> txs) {
-    const ink = Color(0xFF0B1B33);
-    const sub = Color(0xFF2B3F5C);
-    const blue = Color(0xFF0869EE);
-    const months = [
-      'January',
-      'February',
-      'March',
-      'April',
-      'May',
-      'June',
-      'July',
-      'August',
-      'September',
-      'October',
-      'November',
-      'December',
-    ];
+  Widget _periodSelector() {
+    return SizedBox(
+      width: double.infinity,
+      child: SegmentedButton<String>(
+        showSelectedIcon: false,
+        segments: const [
+          ButtonSegment(value: 'Daily', label: Text('Daily')),
+          ButtonSegment(value: 'Monthly', label: Text('Monthly')),
+          ButtonSegment(value: 'Yearly', label: Text('Yearly')),
+        ],
+        selected: {overviewMode},
+        onSelectionChanged: (s) => setState(() {
+          overviewMode = s.first;
+          _selectedBar = null;
+        }),
+      ),
+    );
+  }
 
-    String branchOf(TransactionRecord t) =>
-        t.branch.trim().isEmpty ? 'No Branch' : t.branch.trim();
+  // ---------------------------------------------------------------
+  // 2. HERO: TOTAL RECEIVED
+  // ---------------------------------------------------------------
+  Widget _heroCard({
+    required double rangeTotal,
+    required int rangeCount,
+    required double currentTotal,
+    required double previousTotal,
+  }) {
+    final scope = store.isOwner
+        ? 'All branches'
+        : (_myBranch.isEmpty ? 'Your branch' : _myBranch);
 
-    // Hanay ng mga branch: mga branch ng Owner, iba pang may scan, at "No Branch"
-    final extra = <String>{
-      for (final t in txs)
-        if (!_defaultBranches.contains(branchOf(t))) branchOf(t),
-    }..remove('No Branch');
-    final allBranches = <String>[
-      ..._defaultBranches,
-      ...extra,
-      if (txs.any((t) => branchOf(t) == 'No Branch')) 'No Branch',
-    ];
-    // Admin: sarili niyang branch lang
-    final branches = store.isOwner
-        ? allBranches
-        : <String>[_myBranch.isEmpty ? 'No Branch' : _myBranch];
-
-    // key ng bucket ayon sa napiling Daily / Monthly / Yearly
-    String keyOf(String date) {
-      if (date.length < 4) return '';
-      if (overviewMode == 'Yearly') return date.substring(0, 4);
-      if (overviewMode == 'Monthly' && date.length >= 7) {
-        return date.substring(0, 7);
-      }
-      return date;
-    }
-
-    // bucket -> branch -> [halaga, bilang]
-    final data = <String, Map<String, List<double>>>{};
-    for (final t in txs) {
-      final k = keyOf(t.scanDate); // araw ng pag-scan
-      if (k.isEmpty) continue;
-      final cell = data
-          .putIfAbsent(k, () => {})
-          .putIfAbsent(branchOf(t), () => [0, 0]);
-      cell[0] += t.amount;
-      cell[1] += 1;
-    }
-
-    final now = DateTime.now();
-
-    // Mga bucket na ipapakita (pinakabago muna)
-    final keys = <String>[];
-    final labels = <String, String>{};
-    if (overviewMode == 'Daily') {
-      for (var i = 0; i < 14; i++) {
-        final d = DateTime(now.year, now.month, now.day - i);
-        final k = dateKey(d);
-        keys.add(k);
-        labels[k] = i == 0
-            ? 'Today • ${months[d.month - 1].substring(0, 3)} ${d.day}'
-            : '${months[d.month - 1].substring(0, 3)} ${d.day}, ${d.year}';
-      }
-    } else if (overviewMode == 'Monthly') {
-      for (var i = 0; i < 12; i++) {
-        final d = DateTime(now.year, now.month - i, 1);
-        final k = '${d.year}-${d.month.toString().padLeft(2, '0')}';
-        keys.add(k);
-        labels[k] = '${months[d.month - 1]} ${d.year}';
-      }
-    } else {
-      for (var i = 0; i < 5; i++) {
-        final k = '${now.year - i}';
-        keys.add(k);
-        labels[k] = k;
-      }
-    }
-
-    double bucketTotal(String k) =>
-        (data[k] ?? {}).values.fold<double>(0, (a, c) => a + c[0]);
-
-    final maxTotal = keys.fold<double>(0, (a, k) {
-      final v = bucketTotal(k);
-      return v > a ? v : a;
-    });
-
-    // Kabuuan ng buong saklaw, kada branch
-    final rangeByBranch = <String, double>{};
-    var rangeTotal = 0.0;
-    for (final k in keys) {
-      for (final e in (data[k] ?? {}).entries) {
-        rangeByBranch[e.key] = (rangeByBranch[e.key] ?? 0) + e.value[0];
-        rangeTotal += e.value[0];
-      }
-    }
-
-    final rangeText = overviewMode == 'Daily'
-        ? 'last 14 days'
-        : overviewMode == 'Monthly'
-        ? 'last 12 months'
-        : 'last 5 years';
-
-    return SectionCard(
-      title: 'Transaction Overview',
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        gradient: const LinearGradient(
+          colors: [Color(0xFF0874EE), Color(0xFF0B4FB8)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: _blue.withValues(alpha: .25),
+            blurRadius: 26,
+            offset: const Offset(0, 12),
+          ),
+        ],
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ---------- DAILY / MONTHLY / YEARLY ----------
           Row(
             children: [
-              for (final m in const ['Daily', 'Monthly', 'Yearly'])
-                Padding(
-                  padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(m),
-                    selected: overviewMode == m,
-                    showCheckmark: false,
-                    onSelected: (_) => setState(() => overviewMode = m),
+              const Icon(
+                Icons.account_balance_wallet_outlined,
+                color: Colors.white70,
+                size: 18,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Total Received • $_rangeText',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 10,
+                  vertical: 4,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: .16),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  scope,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              '₱${money(rangeTotal)}',
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 38,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.5,
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '$rangeCount receipt(s)',
+            style: const TextStyle(color: Colors.white70, fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: .10),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _currentText,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          '₱${money(currentTotal)}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    _changeChip(currentTotal, previousTotal, onDark: true),
+                    const SizedBox(height: 4),
+                    Text(
+                      _compareText,
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
-          // ---------- KABUUAN KADA BRANCH (sa napiling saklaw) ----------
+  // ---------------------------------------------------------------
+  // 3. KPI CARDS
+  // ---------------------------------------------------------------
+  Widget _kpiCard({
+    required IconData icon,
+    required Color color,
+    required String label,
+    required String value,
+    String? note,
+    VoidCallback? onTap,
+  }) {
+    return Material(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: _line),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .10),
+                  borderRadius: BorderRadius.circular(11),
+                ),
+                child: Icon(icon, size: 19, color: color),
+              ),
+              const SizedBox(height: 12),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  value,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF2B3F5C),
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              if (note != null) ...[
+                const SizedBox(height: 2),
+                Text(
+                  note,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(color: _sub, fontSize: 11.5),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _kpiGrid(List<Widget> cards) {
+    return LayoutBuilder(
+      builder: (context, c) {
+        final perRow = c.maxWidth >= 700 ? 4 : 2;
+        const gap = 12.0;
+        final w = (c.maxWidth - gap * (perRow - 1)) / perRow;
+        return Wrap(
+          spacing: gap,
+          runSpacing: gap,
+          children: [for (final k in cards) SizedBox(width: w, child: k)],
+        );
+      },
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // 4. BAR CHART (pindutin ang bar)
+  // ---------------------------------------------------------------
+  Widget _chartCard(List<String> keys, Map<String, _Agg> byBucket) {
+    double totalOf(String k) => byBucket[k]?.total ?? 0;
+    final maxTotal = keys.fold<double>(
+      0,
+      (a, k) => totalOf(k) > a ? totalOf(k) : a,
+    );
+    final sel = (_selectedBar != null && keys.contains(_selectedBar))
+        ? _selectedBar!
+        : keys.first;
+    final selAgg = byBucket[sel] ?? _Agg();
+    const chartH = 150.0;
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(
+            'Income',
+            subtitle: '$_rangeText • tap a bar to see details',
+          ),
+          const SizedBox(height: 14),
+
+          // Detalye ng napiling bar
           Container(
             width: double.infinity,
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: const Color(0xFFEAF5FF),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFBBD6F7)),
+              color: const Color(0xFFF2F7FF),
+              borderRadius: BorderRadius.circular(14),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: Row(
               children: [
-                Text(
-                  'Total, $rangeText',
-                  style: const TextStyle(
-                    color: sub,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
+                Expanded(
                   child: Text(
-                    '₱${money(rangeTotal)}',
+                    _bucketLabel(sel),
                     style: const TextStyle(
-                      color: ink,
-                      fontSize: 28,
-                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF2B3F5C),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13,
                     ),
                   ),
                 ),
-                const SizedBox(height: 8),
-                for (final b in branches)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.store_outlined, size: 16, color: blue),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            b,
-                            style: const TextStyle(
-                              color: ink,
-                              fontWeight: FontWeight.w700,
-                              fontSize: 13.5,
-                            ),
-                          ),
-                        ),
-                        Text(
-                          '₱${money(rangeByBranch[b] ?? 0)}',
-                          style: const TextStyle(
-                            color: ink,
-                            fontWeight: FontWeight.w800,
-                            fontSize: 13.5,
-                          ),
-                        ),
-                      ],
-                    ),
+                Text(
+                  '₱${money(selAgg.total)}',
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15,
                   ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  '${selAgg.count} rcpt',
+                  style: const TextStyle(color: _sub, fontSize: 12),
+                ),
               ],
             ),
           ),
           const SizedBox(height: 16),
 
-          // ---------- BAR GRAPH ----------
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.fromLTRB(12, 14, 12, 10),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: const Color(0xFFD6E6FA)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+          // Ang chart
+          SizedBox(
+            height: chartH + 26,
+            child: Stack(
               children: [
-                Text(
-                  overviewMode == 'Daily'
-                      ? 'Daily income (last 14 days)'
-                      : overviewMode == 'Monthly'
-                      ? 'Monthly income (last 12 months)'
-                      : 'Yearly income (last 5 years)',
-                  style: const TextStyle(
-                    color: sub,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
+                // Mga guhit sa likod
+                for (final f in const [1.0, 0.5, 0.0])
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: (1 - f) * chartH,
+                    child: Row(
+                      children: [
+                        Expanded(child: Container(height: 1, color: _line)),
+                        SizedBox(
+                          width: 40,
+                          child: Text(
+                            maxTotal <= 0 ? '' : _shortMoney(maxTotal * f),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(color: _sub, fontSize: 9.5),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-                const SizedBox(height: 12),
-                SizedBox(
-                  height: 190,
+                // Mga bar (pinakaluma sa kaliwa, pinakabago sa kanan)
+                Padding(
+                  padding: const EdgeInsets.only(right: 44),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.end,
                     children: [
-                      // pinakaluma sa kaliwa, pinakabago sa kanan
                       for (final k in keys.reversed)
                         Expanded(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 2),
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => setState(() => _selectedBar = k),
                             child: Column(
                               mainAxisAlignment: MainAxisAlignment.end,
                               children: [
-                                if (bucketTotal(k) > 0)
-                                  FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    child: Text(
-                                      _shortMoney(bucketTotal(k)),
-                                      style: const TextStyle(
-                                        color: ink,
-                                        fontSize: 9.5,
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 250),
+                                  margin: const EdgeInsets.symmetric(
+                                    horizontal: 3,
                                   ),
-                                const SizedBox(height: 3),
-                                Container(
                                   height: maxTotal <= 0
-                                      ? 2
-                                      : (bucketTotal(k) / maxTotal * 130).clamp(
-                                          2.0,
-                                          130.0,
+                                      ? 3
+                                      : (totalOf(k) / maxTotal * chartH).clamp(
+                                          3.0,
+                                          chartH,
                                         ),
                                   decoration: BoxDecoration(
-                                    color: bucketTotal(k) > 0
-                                        ? blue
-                                        : const Color(0xFFD6E6FA),
+                                    color: totalOf(k) <= 0
+                                        ? const Color(0xFFDDE7F3)
+                                        : (k == sel
+                                              ? _blue
+                                              : _blue.withValues(alpha: .35)),
                                     borderRadius: const BorderRadius.vertical(
-                                      top: Radius.circular(5),
+                                      top: Radius.circular(6),
                                     ),
                                   ),
                                 ),
                                 const SizedBox(height: 6),
-                                FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  child: Text(
-                                    _barLabel(k),
-                                    style: const TextStyle(
-                                      color: sub,
-                                      fontSize: 10,
+                                SizedBox(
+                                  height: 20,
+                                  child: FittedBox(
+                                    fit: BoxFit.scaleDown,
+                                    child: Text(
+                                      _barLabel(k),
+                                      style: TextStyle(
+                                        color: k == sel ? _blue : _sub,
+                                        fontSize: 10.5,
+                                        fontWeight: k == sel
+                                            ? FontWeight.w800
+                                            : FontWeight.w500,
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -8039,78 +8434,347 @@ class _ReportsPageState extends State<ReportsPage> {
     );
   }
 
-  // Mga branch ng Owner (galing sa server)
-  List<String> _branchNames = [];
+  // ---------------------------------------------------------------
+  // 5a. KADA BRANCH
+  // ---------------------------------------------------------------
+  Widget _branchCard(Map<String, _Agg> byBranch, double rangeTotal) {
+    final names = store.isOwner
+        ? <String>{..._branchNames, ...byBranch.keys}.toList()
+        : <String>[_myBranch.isEmpty ? 'No Branch' : _myBranch];
+    names.sort(
+      (a, b) => (byBranch[b]?.total ?? 0).compareTo(byBranch[a]?.total ?? 0),
+    );
 
-  List<String> get _defaultBranches => _branchNames;
-
-  // Mga pagtatangkang mag-duplicate (galing sa server)
-  List<Map<String, dynamic>> _dupRows = [];
-
-  @override
-  void initState() {
-    super.initState();
-    _loadBranchNames();
-    _loadDuplicates();
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(
+            store.isOwner ? 'By Branch' : 'Your Branch',
+            subtitle: _rangeText,
+          ),
+          const SizedBox(height: 12),
+          if (names.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('No branches yet.', style: TextStyle(color: _sub)),
+            ),
+          for (final b in names)
+            Builder(
+              builder: (_) {
+                final a = byBranch[b] ?? _Agg();
+                final share = rangeTotal <= 0 ? 0.0 : a.total / rangeTotal;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.store_outlined,
+                            size: 17,
+                            color: _blue,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              b,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: _ink,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            '₱${money(a.total)}',
+                            style: const TextStyle(
+                              color: _ink,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 7),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(10),
+                        child: LinearProgressIndicator(
+                          value: share.clamp(0.0, 1.0),
+                          minHeight: 8,
+                          backgroundColor: const Color(0xFFEAF1FA),
+                          valueColor: const AlwaysStoppedAnimation(_blue),
+                        ),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        '${a.count} receipt(s) • '
+                        '${(share * 100).toStringAsFixed(0)}% of total',
+                        style: const TextStyle(color: _sub, fontSize: 11.5),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
+        ],
+      ),
+    );
   }
 
-  Future<void> _loadDuplicates() async {
-    try {
-      final rows = await ApiService.getDuplicates(store.currentUserId);
-      if (!mounted) return;
-      // Lahat ng duplicate na ibinigay ng server (wala nang nakatagong luma)
-      setState(() => _dupRows = rows);
-    } catch (e) {
-      debugPrint('REPORT DUPLICATES ERROR: $e');
-    }
+  // ---------------------------------------------------------------
+  // 5b. TOP SCANNERS
+  // ---------------------------------------------------------------
+  Widget _scannersCard(Map<String, _Agg> byScanner) {
+    final names = byScanner.keys.toList()
+      ..sort((a, b) => byScanner[b]!.total.compareTo(byScanner[a]!.total));
+    final top = names.take(5).toList();
+    final best = top.isEmpty ? 0.0 : byScanner[top.first]!.total;
+
+    const medal = [Color(0xFFE6A700), Color(0xFF8F9BB3), Color(0xFFB0703C)];
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle('Top Scanners', subtitle: '$_rangeText • by amount'),
+          const SizedBox(height: 12),
+          if (top.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('No scans yet.', style: TextStyle(color: _sub)),
+            ),
+          for (var i = 0; i < top.length; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 7),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 15,
+                    backgroundColor: i < 3
+                        ? medal[i].withValues(alpha: .15)
+                        : const Color(0xFFF1F4F9),
+                    child: Text(
+                      '${i + 1}',
+                      style: TextStyle(
+                        color: i < 3 ? medal[i] : _sub,
+                        fontWeight: FontWeight.w800,
+                        fontSize: 13,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                top[i],
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: _ink,
+                                  fontWeight: FontWeight.w800,
+                                  fontSize: 13.5,
+                                ),
+                              ),
+                            ),
+                            Text(
+                              '₱${money(byScanner[top[i]]!.total)}',
+                              style: const TextStyle(
+                                color: _ink,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 13.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 5),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: LinearProgressIndicator(
+                            value: best <= 0
+                                ? 0
+                                : (byScanner[top[i]]!.total / best).clamp(
+                                    0.0,
+                                    1.0,
+                                  ),
+                            minHeight: 6,
+                            backgroundColor: const Color(0xFFEAF1FA),
+                            valueColor: const AlwaysStoppedAnimation(_green),
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${byScanner[top[i]]!.count} receipt(s)',
+                          style: const TextStyle(color: _sub, fontSize: 11.5),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
-  // Duplicate Receipts: kada reference number, ilang beses sinubukan
-  Widget _duplicatesCard() {
-    const ink = Color(0xFF0B1B33);
-    const sub = Color(0xFF2B3F5C);
-
+  // ---------------------------------------------------------------
+  // 6a. DUPLICATE RECEIPTS
+  //   Maikling card lang. Pindutin para makita ang buong listahan.
+  // ---------------------------------------------------------------
+  Map<String, List<Map<String, dynamic>>> _dupGroups() {
     final groups = <String, List<Map<String, dynamic>>>{};
     for (final r in _dupRows) {
       groups.putIfAbsent(r['reference'].toString(), () => []).add(r);
     }
+    return groups;
+  }
+
+  Widget _duplicatesCard() {
+    final groups = _dupGroups();
+    final count = groups.length;
+    final clear = count == 0;
+    final color = clear ? _green : _red;
+
+    return Material(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(22),
+        side: const BorderSide(color: _line),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(22),
+        onTap: clear ? null : _openDuplicates,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: .10),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Icon(
+                  clear ? Icons.verified_outlined : Icons.content_copy_rounded,
+                  color: color,
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      store.isAdmin && _myBranch.isNotEmpty
+                          ? 'Duplicate Receipts • $_myBranch'
+                          : 'Duplicate Receipts',
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                        color: _ink,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      clear
+                          ? 'All clear, no receipt was saved twice'
+                          : '${_dupRows.length} attempt(s) on $count receipt(s) • tap to view',
+                      style: const TextStyle(fontSize: 12.5, color: _sub),
+                    ),
+                  ],
+                ),
+              ),
+              if (!clear) ...[
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: _red.withValues(alpha: .10),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '$count',
+                    style: const TextStyle(
+                      color: _red,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                const Icon(Icons.chevron_right_rounded, color: _sub),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Buong listahan ng duplicates (lalabas mula sa ibaba)
+  void _openDuplicates() {
+    final groups = _dupGroups();
     final refs = groups.keys.toList()
       ..sort((a, b) => groups[b]!.length.compareTo(groups[a]!.length));
 
-    return SectionCard(
-      // Admin: duplicates ng branch niya lang (ang server ang nagsasala)
-      title: store.isAdmin && _myBranch.isNotEmpty
-          ? 'Duplicate Receipts • $_myBranch'
-          : 'Duplicate Receipts',
-      padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
-      child: refs.isEmpty
-          ? const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text(
-                'No duplicate receipts so far.',
-                style: TextStyle(color: sub),
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: .6,
+        minChildSize: .35,
+        maxChildSize: .92,
+        builder: (ctx, scroll) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              child: _cardTitle(
+                'Duplicate Receipts',
+                subtitle:
+                    '${_dupRows.length} attempt(s) on ${refs.length} receipt(s)',
               ),
-            )
-          : Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '${_dupRows.length} duplicate attempt(s) on '
-                  '${refs.length} receipt(s)',
-                  style: const TextStyle(
-                    color: sub,
-                    fontWeight: FontWeight.w700,
-                    fontSize: 13,
-                  ),
-                ),
-                const SizedBox(height: 10),
-                for (final ref in refs)
-                  Container(
+            ),
+            Expanded(
+              child: ListView.builder(
+                controller: scroll,
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 24),
+                itemCount: refs.length,
+                itemBuilder: (ctx, i) {
+                  final ref = refs[i];
+                  final rows = groups[ref]!;
+                  final first = rows.first;
+                  final amount = (first['amount'] is num)
+                      ? (first['amount'] as num).toDouble()
+                      : double.tryParse(first['amount'].toString()) ?? 0;
+                  final scanners = {
+                    for (final x in rows)
+                      if (x['scanner'].toString().isNotEmpty)
+                        x['scanner'].toString(),
+                  }.join(', ');
+
+                  return Container(
                     margin: const EdgeInsets.only(bottom: 10),
                     decoration: BoxDecoration(
-                      color: Colors.white,
+                      color: const Color(0xFFFFF8F8),
                       borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: const Color(0xFFD6E6FA)),
+                      border: Border.all(color: const Color(0xFFF6D6D6)),
                     ),
                     child: ExpansionTile(
                       shape: const Border(),
@@ -8118,17 +8782,18 @@ class _ReportsPageState extends State<ReportsPage> {
                       title: Text(
                         ref,
                         style: const TextStyle(
-                          color: ink,
+                          color: _ink,
                           fontWeight: FontWeight.w800,
                           fontSize: 14,
                         ),
                       ),
                       subtitle: Text(
-                        '${groups[ref]!.first['customer']} • '
-                        '₱${money((groups[ref]!.first['amount'] as num).toDouble())}\n'
-                        'Scanned by: ${{for (final x in groups[ref]!)
-                          if (x['scanner'].toString().isNotEmpty) x['scanner'].toString()}.join(', ')}',
-                        style: const TextStyle(color: sub, fontSize: 12),
+                        '${first['customer']} • ₱${money(amount)}'
+                        '${scanners.isEmpty ? '' : '\nScanned by: $scanners'}',
+                        style: const TextStyle(
+                          color: Color(0xFF2B3F5C),
+                          fontSize: 12,
+                        ),
                       ),
                       trailing: Container(
                         padding: const EdgeInsets.symmetric(
@@ -8140,21 +8805,21 @@ class _ReportsPageState extends State<ReportsPage> {
                           borderRadius: BorderRadius.circular(20),
                         ),
                         child: Text(
-                          '${groups[ref]!.length}x',
+                          '${rows.length}x',
                           style: const TextStyle(
-                            color: Color(0xFFC62828),
+                            color: _red,
                             fontWeight: FontWeight.w800,
                           ),
                         ),
                       ),
                       children: [
-                        for (final r in groups[ref]!)
+                        for (final r in rows)
                           ListTile(
                             dense: true,
                             leading: const Icon(
                               Icons.content_copy,
                               size: 18,
-                              color: Color(0xFFC62828),
+                              color: _red,
                             ),
                             title: Text(
                               '${r['scanner'] == '' ? 'Unknown' : r['scanner']}'
@@ -8165,40 +8830,35 @@ class _ReportsPageState extends State<ReportsPage> {
                           ),
                       ],
                     ),
-                  ),
-              ],
+                  );
+                },
+              ),
             ),
+          ],
+        ),
+      ),
     );
   }
 
-  Future<void> _loadBranchNames() async {
-    try {
-      final rows = await ApiService.listBranches(userId: store.currentUserId);
-      if (!mounted) return;
-      setState(() {
-        _branchNames = [for (final r in rows) r['name'].toString()];
-      });
-    } catch (e) {
-      debugPrint('REPORT BRANCHES ERROR: $e');
-    }
-  }
+  // ---------------------------------------------------------------
+  // 6b. DAILY TRANSACTION SUMMARY
+  // ---------------------------------------------------------------
 
-  // Igrupo ang mga transaction ng isang araw ayon sa BRANCH kung saan na-scan
+  // Igrupo ang mga transaction ng isang araw ayon sa branch kung saan na-scan
   List<Widget> _branchSections(
     BuildContext context,
     List<TransactionRecord> dayList,
   ) {
     final byBranch = <String, List<TransactionRecord>>{};
     for (final t in dayList) {
-      final b = t.branch.trim().isEmpty ? 'No Branch' : t.branch.trim();
-      byBranch.putIfAbsent(b, () => []).add(t);
+      byBranch.putIfAbsent(_branchOf(t), () => []).add(t);
     }
 
     final names = store.isOwner
         ? <String>[
-            ..._defaultBranches,
+            ..._branchNames,
             ...byBranch.keys.where(
-              (b) => !_defaultBranches.contains(b) && b != 'No Branch',
+              (b) => !_branchNames.contains(b) && b != 'No Branch',
             ),
             if (byBranch.containsKey('No Branch')) 'No Branch',
           ]
@@ -8221,7 +8881,7 @@ class _ReportsPageState extends State<ReportsPage> {
           childrenPadding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
           leading: Icon(
             b == 'No Branch' ? Icons.help_outline : Icons.store_outlined,
-            color: const Color(0xFF0869EE),
+            color: _blue,
           ),
           title: Text(
             b,
@@ -8233,10 +8893,7 @@ class _ReportsPageState extends State<ReportsPage> {
           ),
           trailing: Text(
             '₱${money(sum)}',
-            style: const TextStyle(
-              fontWeight: FontWeight.w800,
-              color: Color(0xFF07976F),
-            ),
+            style: const TextStyle(fontWeight: FontWeight.w800, color: _green),
           ),
           children: items.isEmpty
               ? const [
@@ -8266,6 +8923,154 @@ class _ReportsPageState extends State<ReportsPage> {
     }).toList();
   }
 
+  Widget _dailySummaryCard(List<TransactionRecord> txs) {
+    final branchChoices = <String>[
+      'All',
+      if (store.isOwner) ..._branchNames,
+      if (store.isOwner) ...{
+        for (final t in txs)
+          if (!_branchNames.contains(_branchOf(t))) _branchOf(t),
+      },
+    ];
+    if (!branchChoices.contains(selectedBranch)) selectedBranch = 'All';
+
+    final summaryTxs = selectedBranch == 'All'
+        ? txs
+        : txs.where((t) => _branchOf(t) == selectedBranch).toList();
+    final todayKey = dateKey(DateTime.now());
+    final byDate = <String, List<TransactionRecord>>{};
+    for (final t in summaryTxs) {
+      final key = t.scanDate.isEmpty ? 'No date' : t.scanDate;
+      byDate.putIfAbsent(key, () => []).add(t);
+    }
+    final summaryDates = byDate.keys.toList()..sort((a, b) => b.compareTo(a));
+
+    return _card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _cardTitle(
+            'Daily Transaction Summary',
+            subtitle: 'Every receipt, grouped by the day it was scanned',
+          ),
+          const SizedBox(height: 12),
+          if (store.isOwner)
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  for (final b in branchChoices)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: ChoiceChip(
+                        avatar: Icon(
+                          b == 'All'
+                              ? Icons.apps_rounded
+                              : Icons.store_outlined,
+                          size: 16,
+                        ),
+                        label: Text(b),
+                        selected: selectedBranch == b,
+                        showCheckmark: false,
+                        onSelected: (_) => setState(() => selectedBranch = b),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          if (selectedBranch != 'All') ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFEAF5FF),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                '$selectedBranch: ${summaryTxs.length} transaction(s) • '
+                '₱${money(summaryTxs.fold<double>(0, (s, t) => s + t.amount))}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF0869D8),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          if (summaryDates.isEmpty)
+            EmptyState(
+              text: selectedBranch == 'All'
+                  ? 'No transactions yet.'
+                  : 'No scans yet for $selectedBranch.',
+            )
+          else
+            for (final day in summaryDates)
+              Builder(
+                builder: (context) {
+                  final list = byDate[day]!;
+                  final dayTotal = list.fold<double>(0, (s, t) => s + t.amount);
+                  final isToday = day == todayKey;
+
+                  return ExpansionTile(
+                    shape: const Border(),
+                    collapsedShape: const Border(),
+                    tilePadding: EdgeInsets.zero,
+                    initiallyExpanded: isToday,
+                    leading: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: isToday ? _blue : const Color(0xFFF1F4F9),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Icon(
+                        Icons.calendar_today_outlined,
+                        size: 18,
+                        color: isToday ? Colors.white : _sub,
+                      ),
+                    ),
+                    title: Text(
+                      isToday ? '$day (Today)' : day,
+                      style: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                    subtitle: Text(
+                      '${list.length} transaction(s)',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    trailing: Text(
+                      '₱${money(dayTotal)}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: _green,
+                      ),
+                    ),
+                    children: selectedBranch == 'All'
+                        ? _branchSections(context, list)
+                        : list
+                              .map(
+                                (t) => GestureDetector(
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => showTransactionDetail(
+                                    context,
+                                    store.currentUserId,
+                                    t,
+                                  ),
+                                  child: TransactionTile(t, showScanner: true),
+                                ),
+                              )
+                              .toList(),
+                  );
+                },
+              ),
+        ],
+      ),
+    );
+  }
+
+  // ---------------------------------------------------------------
+  // BUILD
+  // ---------------------------------------------------------------
   @override
   Widget build(BuildContext context) {
     if (!store.canSeeReceipts) {
@@ -8277,162 +9082,154 @@ class _ReportsPageState extends State<ReportsPage> {
     }
 
     final txs = store.getTransactions();
+    final keys = _bucketKeys();
+    final keySet = keys.toSet();
 
-    String branchOf(TransactionRecord t) =>
-        t.branch.trim().isEmpty ? 'No Branch' : t.branch.trim();
+    // Mga resibo sa napiling saklaw
+    final rangeTxs = <TransactionRecord>[];
+    final byBucket = <String, _Agg>{};
+    final byBranch = <String, _Agg>{};
+    final byScanner = <String, _Agg>{};
 
-    // Mga pagpipilian: mga branch ng Owner + anumang iba pang may scan
-    final branchChoices = <String>[
-      'All',
-      if (store.isOwner) ..._defaultBranches,
-      if (store.isOwner) ...{
-        for (final t in txs)
-          if (!_defaultBranches.contains(branchOf(t))) branchOf(t),
-      },
-    ];
-    if (!branchChoices.contains(selectedBranch)) selectedBranch = 'All';
-
-    // Daily Transaction Summary: igrupo kada araw (ayon sa napiling branch)
-    final summaryTxs = selectedBranch == 'All'
-        ? txs
-        : txs.where((t) => branchOf(t) == selectedBranch).toList();
-    final todayKey = dateKey(DateTime.now());
-    final byDate = <String, List<TransactionRecord>>{};
-    for (final t in summaryTxs) {
-      final key = t.scanDate.isEmpty ? 'No date' : t.scanDate;
-      byDate.putIfAbsent(key, () => []).add(t);
+    for (final t in txs) {
+      final k = _keyOf(t.scanDate);
+      if (!keySet.contains(k)) continue;
+      rangeTxs.add(t);
+      byBucket.putIfAbsent(k, () => _Agg()).add(t.amount);
+      byBranch.putIfAbsent(_branchOf(t), () => _Agg()).add(t.amount);
+      final who = t.scannedBy.trim().isEmpty ? 'Unknown' : t.scannedBy.trim();
+      byScanner.putIfAbsent(who, () => _Agg()).add(t.amount);
     }
-    final summaryDates = byDate.keys.toList()..sort((a, b) => b.compareTo(a));
+
+    final rangeTotal = rangeTxs.fold<double>(0, (s, t) => s + t.amount);
+    final rangeCount = rangeTxs.length;
+    final avg = rangeCount == 0 ? 0.0 : rangeTotal / rangeCount;
+    final current = byBucket[keys[0]]?.total ?? 0;
+    final previous = byBucket[keys[1]]?.total ?? 0;
+
+    // Pinakamataas na araw/buwan/taon
+    String? bestKey;
+    for (final k in keys) {
+      final v = byBucket[k]?.total ?? 0;
+      if (v > 0 && (bestKey == null || v > (byBucket[bestKey]?.total ?? 0))) {
+        bestKey = k;
+      }
+    }
+
+    // Pinakamalaking isang resibo sa saklaw
+    final bestBucket = bestKey;
+
+    TransactionRecord? biggest;
+    for (final t in rangeTxs) {
+      if (biggest == null || t.amount > biggest.amount) biggest = t;
+    }
+
+    // Duplicates sa saklaw
+    final dupInRange = _dupRows.where((r) {
+      final c = r['createdAt']?.toString() ?? '';
+      return keySet.contains(_keyOf(c.length >= 10 ? c.substring(0, 10) : c));
+    }).length;
 
     return PageFrame(
       title: 'Reports',
       subtitle: 'Transaction and receipt summary',
       child: RefreshIndicator(
-        onRefresh: () async {
-          await store.syncTransactions();
-          await _loadDuplicates();
-          if (!mounted) return;
-          setState(() {});
-        },
+        onRefresh: _refresh,
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(14, 16, 14, 40),
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 40),
           children: [
-            _overviewCard(txs),
-            const SizedBox(height: 24),
-            _duplicatesCard(),
-            const SizedBox(height: 24),
-            SectionCard(
-              title: 'Daily Transaction Summary',
-              padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // ---------- PILI NG BRANCH (Owner lang) ----------
-                  if (store.isOwner)
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          for (final b in branchChoices)
-                            Padding(
-                              padding: const EdgeInsets.only(right: 8),
-                              child: ChoiceChip(
-                                avatar: Icon(
-                                  b == 'All'
-                                      ? Icons.apps_rounded
-                                      : Icons.store_outlined,
-                                  size: 16,
-                                ),
-                                label: Text(b),
-                                selected: selectedBranch == b,
-                                showCheckmark: false,
-                                onSelected: (_) =>
-                                    setState(() => selectedBranch = b),
-                              ),
-                            ),
-                        ],
-                      ),
+            Center(
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 900),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _periodSelector(),
+                    const SizedBox(height: 16),
+                    _heroCard(
+                      rangeTotal: rangeTotal,
+                      rangeCount: rangeCount,
+                      currentTotal: current,
+                      previousTotal: previous,
                     ),
-                  if (selectedBranch != 'All') ...[
-                    const SizedBox(height: 10),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFEAF5FF),
-                        borderRadius: BorderRadius.circular(12),
+                    const SizedBox(height: 14),
+                    _kpiGrid([
+                      _kpiCard(
+                        icon: Icons.receipt_long_outlined,
+                        color: _blue,
+                        label: 'Receipts',
+                        value: '$rangeCount',
+                        note: _rangeText,
                       ),
-                      child: Text(
-                        '$selectedBranch: ${summaryTxs.length} transaction(s) • '
-                        '₱${money(summaryTxs.fold<double>(0, (s, t) => s + t.amount))}',
-                        style: const TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF0869D8),
-                        ),
+                      _kpiCard(
+                        icon: Icons.functions_rounded,
+                        color: const Color(0xFF7047C8),
+                        label: 'Average per receipt',
+                        value: '₱${money(avg)}',
+                        note: 'Total ÷ receipts',
                       ),
+                      _kpiCard(
+                        icon: Icons.emoji_events_outlined,
+                        color: const Color(0xFFE6A700),
+                        label: overviewMode == 'Daily'
+                            ? 'Best day'
+                            : overviewMode == 'Monthly'
+                            ? 'Best month'
+                            : 'Best year',
+                        value: bestBucket == null
+                            ? '—'
+                            : '₱${_shortMoney(byBucket[bestBucket]!.total)}',
+                        note: bestBucket == null
+                            ? 'No scans yet'
+                            : _bucketLabel(bestBucket),
+                        onTap: bestBucket == null
+                            ? null
+                            : () => setState(() => _selectedBar = bestBucket),
+                      ),
+                      _kpiCard(
+                        icon: Icons.content_copy_rounded,
+                        color: dupInRange > 0 ? _red : _green,
+                        label: 'Duplicate attempts',
+                        value: '$dupInRange',
+                        note: biggest == null
+                            ? _rangeText
+                            : 'Biggest: ₱${money(biggest.amount)}',
+                      ),
+                    ]),
+                    const SizedBox(height: 14),
+                    _chartCard(keys, byBucket),
+                    const SizedBox(height: 14),
+                    LayoutBuilder(
+                      builder: (context, c) {
+                        final wide = c.maxWidth >= 700;
+                        final branch = _branchCard(byBranch, rangeTotal);
+                        final scanners = _scannersCard(byScanner);
+                        if (!wide) {
+                          return Column(
+                            children: [
+                              branch,
+                              const SizedBox(height: 14),
+                              scanners,
+                            ],
+                          );
+                        }
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(child: branch),
+                            const SizedBox(width: 14),
+                            Expanded(child: scanners),
+                          ],
+                        );
+                      },
                     ),
+                    const SizedBox(height: 14),
+                    _duplicatesCard(),
+                    const SizedBox(height: 14),
+                    _dailySummaryCard(txs),
                   ],
-                  const SizedBox(height: 8),
-                  summaryDates.isEmpty
-                      ? EmptyState(
-                          text: selectedBranch == 'All'
-                              ? 'No transactions yet.'
-                              : 'No scans yet for $selectedBranch.',
-                        )
-                      : Column(
-                          children: summaryDates.map((day) {
-                            final list = byDate[day]!;
-                            final dayTotal = list.fold<double>(
-                              0,
-                              (s, t) => s + t.amount,
-                            );
-                            final todayText = day == todayKey ? ' (Today)' : '';
-
-                            return ExpansionTile(
-                              shape: const Border(),
-                              collapsedShape: const Border(),
-                              tilePadding: EdgeInsets.zero,
-                              initiallyExpanded: day == todayKey,
-                              title: Text(
-                                '$day$todayText',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              subtitle: Text(
-                                '${list.length} transaction(s)',
-                                style: const TextStyle(fontSize: 12),
-                              ),
-                              trailing: Text(
-                                '₱${money(dayTotal)}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w800,
-                                  color: Color(0xFF07976F),
-                                ),
-                              ),
-                              children: selectedBranch == 'All'
-                                  ? _branchSections(context, list)
-                                  : list
-                                        .map(
-                                          (t) => GestureDetector(
-                                            behavior: HitTestBehavior.opaque,
-                                            onTap: () => showTransactionDetail(
-                                              context,
-                                              store.currentUserId,
-                                              t,
-                                            ),
-                                            child: TransactionTile(
-                                              t,
-                                              showScanner: true,
-                                            ),
-                                          ),
-                                        )
-                                        .toList(),
-                            );
-                          }).toList(),
-                        ),
-                ],
+                ),
               ),
             ),
           ],
