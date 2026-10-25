@@ -19,18 +19,17 @@ const bool kDebugLoad = false;
 class ApiService {
   // ============================================================
   // API BASE URL
-  // Android Emulator -> PC localhost
   // ============================================================
-  //
-  // PALITAN ito ng address ng online server mo, hal.:
-  //   'https://iyong-domain.com/paws_backend/api.php'
-  // Habang nasa XAMPP (parehong Wi-Fi), ito ang gamitin:
   static const String baseUrl =
       'https://orange-dunlin-410464.hostingersite.com/api.php';
 
-  // Dapat PAREHO ng 'app_token' sa config.php ng server
-  static const String appToken =
-      '6ee116e2f51da1e8fcf4cd9678fe620008cffad500016c49';
+  // Dapat PAREHO ng 'app_token' sa config.php ng server.
+  // PALITAN ng bagong random na string (at ilagay din sa config.php).
+  static const String appToken = 'PALITAN_bagong_random_token';
+
+  // Session token na galing sa login. Ipinapadala sa bawat tawag para
+  // malaman ng server kung sino ang naka-login (hindi na ang user_id).
+  static String sessionToken = '';
 
   // ============================================================
   // HELPER: SEND POST REQUEST
@@ -84,6 +83,7 @@ class ApiService {
   }) async {
     try {
       final response = await _postFollowingRedirects(Uri.parse(baseUrl), {
+        if (sessionToken.isNotEmpty) 'session_token': sessionToken,
         ...body,
         'app_token': appToken,
       }).timeout(timeout);
@@ -114,15 +114,13 @@ class ApiService {
 
       return decoded;
     } catch (e) {
-      debugPrint('LOGIN ERROR: $e');
+      debugPrint('API ERROR: $e');
       throw Exception('Unable to connect to server: $e');
     }
   }
 
   // ============================================================
-  // LOGIN
-  // Compatible with:
-  // api.php -> action=login
+  // LOGIN (nagbabalik ng session token)
   // ============================================================
   static Future<Map<String, dynamic>> login({
     required String email,
@@ -133,6 +131,18 @@ class ApiService {
       'email': email,
       'password': password,
     });
+  }
+
+  // LOGOUT: burahin ang session sa server at sa phone
+  static Future<void> logout() async {
+    final token = sessionToken;
+    sessionToken = '';
+    if (token.isEmpty) return;
+    try {
+      await _post({'action': 'logout', 'session_token': token});
+    } catch (e) {
+      debugPrint('LOGOUT ERROR: $e');
+    }
   }
 
   // PIN: nasa server, isa lang kada account at hindi na mapapalitan
@@ -160,10 +170,6 @@ class ApiService {
 
   // ============================================================
   // REGISTER / SIGN UP
-  // Compatible with:
-  // api.php -> action=signup
-  // Walang branch dito. Pipili ang staff ng branch pagkatapos
-  // gumawa ng account (setBranch).
   // ============================================================
   static Future<Map<String, dynamic>> register({
     required String name,
@@ -190,11 +196,8 @@ class ApiService {
 
   // ============================================================
   // BRANCHES
-  // api.php -> action=list_branches / add_branch / set_branch /
-  //            change_branch_password
   // ============================================================
-  // Walang userId (sign up): lahat ng branch. May userId: mga branch lang
-  // ng Owner niya (bawat Owner ay may sariling mga branch).
+  // Naka-login: mga branch ng Owner niya. Sign up: kailangan ang ownerCode.
   static Future<List<Map<String, dynamic>>> listBranches({
     int userId = 0,
     String ownerCode = '',
@@ -222,8 +225,7 @@ class ApiService {
     });
   }
 
-  // Staff/Admin na wala pang branch: pumili lang (walang password).
-  // Ang password ng branch ay hihingin lang kapag LILIPAT na ng branch.
+  // Staff na wala pang branch: pumili ng branch gamit ang password nito
   static Future<Map<String, dynamic>> setBranch({
     required int userId,
     required String branchId,
@@ -237,7 +239,7 @@ class ApiService {
     });
   }
 
-  // Owner/Admin: palitan ang password ng isang branch
+  // Owner: palitan ang password ng isang branch
   static Future<Map<String, dynamic>> changeBranchPassword({
     required int userId,
     required String branchId,
@@ -253,8 +255,6 @@ class ApiService {
 
   // ============================================================
   // ADD TRANSACTION
-  // Compatible with:
-  // api.php -> action=add_transaction
   // ============================================================
   static Future<Map<String, dynamic>> addTransaction({
     required int userId,
@@ -267,13 +267,11 @@ class ApiService {
     required String rawText,
     String senderNumber = '',
     String receiptImageBase64 = '',
-    bool allowDuplicate = false,
   }) async {
     return await _post({
       'action': 'add_transaction',
       'sender_number': senderNumber,
       'receipt_image': receiptImageBase64,
-      'allow_duplicate': allowDuplicate ? '1' : '0',
       'user_id': userId.toString(),
       'customer_name': customerName,
       'date_time': dateTime,
@@ -285,6 +283,19 @@ class ApiService {
     }, timeout: const Duration(seconds: 90));
   }
 
+  // ============================================================
+  // AI PARSE RECEIPT (Gemini, sa server ang tawag)
+  // Ibinabalik: isGcash, name, senderNumber, amount, reference
+  // ============================================================
+  static Future<Map<String, dynamic>> aiParseReceipt({
+    required int userId,
+    required String imageBase64,
+  }) => _post({
+    'action': 'ai_parse_receipt',
+    'user_id': userId.toString(),
+    'receipt_image': imageBase64,
+  }, timeout: const Duration(seconds: 60));
+
   // Mga pagtatangkang mag-duplicate (Owner/Admin)
   static Future<List<Map<String, dynamic>>> getDuplicates(int userId) => _list(
     'get_duplicates',
@@ -294,7 +305,6 @@ class ApiService {
 
   // ============================================================
   // GET RECEIPT IMAGE (ang na-scan na larawan ng isang transaction)
-  // Compatible with: api.php -> action=get_receipt_image
   // ============================================================
   static Future<Map<String, dynamic>> getReceiptImage({
     required int userId,
@@ -309,12 +319,8 @@ class ApiService {
 
   // ============================================================
   // GET TRANSACTIONS
-  // Compatible with:
-  // api.php -> action=get_transactions
-  //
-  // all = true  -> Owner/Admin: kunin ang LAHAT ng transaction
-  // all = false -> Staff: sarili lang nilang transaction
-  // (Ang server ang magve-verify ng role gamit ang user_id.)
+  //   all = true  -> Owner/Admin: lahat (Admin: branch niya lang)
+  //   all = false -> Staff: sarili lang nilang transaction
   // ============================================================
   static Future<List<Map<String, dynamic>>> getTransactions({
     required int userId,
@@ -344,8 +350,6 @@ class ApiService {
 
   // ============================================================
   // DELETE ONE TRANSACTION
-  // Compatible with:
-  // api.php -> action=delete_transaction
   // ============================================================
   static Future<Map<String, dynamic>> deleteTransaction({
     required int userId,
@@ -360,8 +364,6 @@ class ApiService {
 
   // ============================================================
   // DELETE ALL TRANSACTIONS
-  // Compatible with:
-  // api.php -> action=delete_all_transactions
   // ============================================================
   static Future<Map<String, dynamic>> deleteAllTransactions({
     required int userId,
@@ -441,7 +443,7 @@ class ApiService {
         extra: {'user_id': userId.toString()},
       );
 
-  // Owner o kahit sinong Admin: approve o reject
+  // Owner o Admin ng pupuntahang branch: approve o reject
   static Future<Map<String, dynamic>> decideBranchRequest({
     required int userId,
     required int requestId,
@@ -454,16 +456,6 @@ class ApiService {
       'decision': approve ? 'approve' : 'reject',
     });
   }
-
-  // Admin: siya mismo ang pumipili / nagpapalit ng branch niya ('0' = alisin)
-  static Future<Map<String, dynamic>> setAdminBranch({
-    required int userId,
-    required String branchId,
-  }) => _post({
-    'action': 'set_admin_branch',
-    'user_id': userId.toString(),
-    'branch_id': branchId,
-  });
 
   // Owner lang: ilagay / ilipat ang Admin o Staff sa isang branch
   static Future<Map<String, dynamic>> assignBranch({
@@ -531,13 +523,7 @@ class ApiService {
   }
 
   // ============================================================
-  // CHANGE PASSWORD
-  // Compatible with:
-  // api.php -> action=change_password
-  // ============================================================
-  // ============================================================
   // FORGOT PASSWORD (code sa email)
-  // api.php -> action=forgot_request / forgot_reset
   // ============================================================
   static Future<Map<String, dynamic>> forgotRequest(String email) async {
     return await _post({'action': 'forgot_request', 'email': email});
@@ -583,6 +569,9 @@ class ApiService {
     'new_password': newPassword,
   });
 
+  // ============================================================
+  // CHANGE PASSWORD
+  // ============================================================
   static Future<Map<String, dynamic>> changePassword({
     required int userId,
     required String currentPassword,
@@ -599,20 +588,18 @@ class ApiService {
 
 // ============================================================
 // FACE RECOGNITION
-// Kumukuha ng "face embedding" (192 numbers na kumakatawan sa mukha)
-// gamit ang front camera, tapos ikinukumpara sa naka-register na mukha.
-// Sa PHONE lang naka-save ang face data (hindi sa database).
+// Kumukuha ng "face embedding" gamit ang front camera, tapos ikinukumpara
+// sa naka-register na mukha. Sa PHONE lang naka-save ang face data.
 // ============================================================
 
 // I-set sa false kung gusto mong i-bypass ang face check habang nagte-test
 const bool kRequireFace = false;
 
-// I-set sa false kung gusto mong i-bypass ang PIN habang nagte-test
+// PIN pagkatapos mag-login. Huwag i-false: kailangan ng server na
+// ma-verify ang PIN bago gumana ang ibang feature ng app.
 const bool kRequirePin = true;
 
 // Gaano kahigpit ang pagtutugma (0.0 - 1.0). Mas mataas = mas mahigpit.
-// Kung ayaw tanggapin ang tamang may-ari, ibaba (hal. 0.5).
-// Kung natatanggap ang ibang tao, itaas (hal. 0.7).
 const double kFaceMatchThreshold = 0.6;
 
 // Ipakita ang score sa mensahe habang nagte-tune. I-set sa false pagkatapos.
@@ -1082,6 +1069,8 @@ class _ReceiScanAppState extends State<ReceiScanApp> {
               store: widget.store,
               user: user!,
               onLogout: () {
+                // Burahin ang session sa server (hindi na hinihintay)
+                ApiService.logout();
                 widget.store.clearSession();
                 setState(() => user = null);
               },
@@ -1162,12 +1151,11 @@ class TransactionRecord {
   String rawText;
   String scannedBy; // pangalan ng nag-scan (galing sa server)
   String senderNumber; // number ng sender (galing sa receipt)
-  String branch; // branch ng nag-scan
+  String branch; // branch kung saan na-scan
   bool hasImage; // may na-save bang larawan ng na-scan na receipt
   String createdAt; // kung kailan na-save sa server (YYYY-MM-DD HH:MM:SS)
 
   // Araw ng PAG-SCAN (kung kailan na-save), hindi ang petsa sa resibo.
-  // Ito ang gamit ng bar graph, Daily Transaction Summary at Records.
   String get scanDate {
     final c = createdAt.trim();
     if (c.length >= 10 && RegExp(r'^\d{4}-\d{2}-\d{2}').hasMatch(c)) {
@@ -1343,13 +1331,10 @@ class ReceiScanStore {
   List<Map<String, dynamic>> _logs = [];
   List<AttendanceRecord> _attendance = [];
 
-  // ID ng naka-login na user (kailangan ng API)
+  // ID ng naka-login na user
   int currentUserId = 0;
 
   // Role ng naka-login na user.
-  // Owner: lahat ng branch (receipt, logs, accounts, reports).
-  // Admin: receipt, logs at accounts ng SARILING branch lang.
-  // Staff: sarili lang nilang receipt ang nakikita; walang logs.
   String currentRole = '';
 
   // Session guard: binabago sa bawat login/logout para ibasura ang
@@ -1376,8 +1361,7 @@ class ReceiScanStore {
 
   bool get isAdmin => currentRole == 'admin';
 
-  // Owner: receipts ng lahat ng branch. Admin: receipts ng branch niya lang
-  // (ang server ang nagsasala).
+  // Owner: receipts ng lahat ng branch. Admin: branch niya lang.
   bool get canSeeReceipts => currentRole == 'owner' || currentRole == 'admin';
 
   // True kung hindi naabot ang server sa huling refresh
@@ -1425,8 +1409,7 @@ class ReceiScanStore {
         .toList();
   }
 
-  // Owner: lahat ng transaction ng staff.
-  // Staff: sarili lang nilang transaction.
+  // Owner/Admin: lahat ng makikita nila. Staff: sarili lang.
   Future<void> refreshTransactions() async {
     final captureSession = _sessionId;
     final captureUid = currentUserId;
@@ -1489,11 +1472,8 @@ class ReceiScanStore {
     }
     final rows = await ApiService.getLogs(captureUid);
     if (captureSession != _sessionId || captureUid != currentUserId) return;
-    // I-filter ang lumang logs mula kahapon; panatilihin ang bagong logs at duplicate receipts
-    _logs = rows.where((l) {
-      final c = l['created']?.toString() ?? '';
-      return c.compareTo('2026-10-24 02:44:00') >= 0;
-    }).toList();
+    // Lahat ng logs na ibinigay ng server (wala nang nakatagong lumang logs)
+    _logs = rows;
   }
 
   // Mga pending na request ng staff na lumipat ng branch
@@ -1544,8 +1524,6 @@ class ReceiScanStore {
 
     if (captureUid <= 0) return false;
 
-    // Bawat bahagi ay hiwalay: kapag may pumalya (hal. Attendance), hindi
-    // dapat madamay ang Transactions. Hinihintay muna ang lahat bago bumalik.
     var allOk = true;
     Future<void> safe(Future<void> Function() job, String label) async {
       try {
@@ -1557,9 +1535,7 @@ class ReceiScanStore {
       }
     }
 
-    // Ang Transactions ang una at mag-isa (para hindi sumabay sa ibang
-    // request na sabay-sabay ding tumatama sa database). May ilang ulit na
-    // subok kapag pumalya.
+    // Ang Transactions ang una at mag-isa. May ilang ulit na subok kapag pumalya.
     String? txError;
     for (var attempt = 0; attempt < 3; attempt++) {
       if (captureSession != _sessionId || captureUid != currentUserId) {
@@ -1723,6 +1699,13 @@ class _LoginPageState extends State<LoginPage> {
   bool obscure = true;
   bool loading = false;
 
+  @override
+  void dispose() {
+    email.dispose();
+    password.dispose();
+    super.dispose();
+  }
+
   Future<void> login() async {
     final e = email.text.trim().toLowerCase();
     final p = password.text;
@@ -1747,17 +1730,16 @@ class _LoginPageState extends State<LoginPage> {
         return;
       }
 
-      // Paalala kung luma pa ang api.php sa server (hindi pa hiwalay ang
-      // data ng bawat Owner hangga't hindi na-upload ang bago)
-      if ((int.tryParse(result['apiVersion']?.toString() ?? '') ?? 0) < 6) {
+      // Paalala kung luma pa ang api.php sa server
+      if ((int.tryParse(result['apiVersion']?.toString() ?? '') ?? 0) < 7) {
+        setState(() => loading = false);
         await showDialog<void>(
           context: context,
           builder: (dialogContext) => AlertDialog(
             title: const Text('Server is outdated'),
             content: const Text(
               'The api.php on your server is not the latest version. '
-              'Upload the newest api.php, otherwise each Owner\'s data is '
-              'not yet separated.',
+              'Upload the newest api.php and config.php, then log in again.',
             ),
             actions: [
               FilledButton(
@@ -1767,17 +1749,20 @@ class _LoginPageState extends State<LoginPage> {
             ],
           ),
         );
-        if (!mounted) return;
+        return;
       }
+
+      // Itago ang session token para sa lahat ng susunod na tawag
+      ApiService.sessionToken = result['token']?.toString() ?? '';
 
       final userData = result['user'];
 
-      if (userData == null) {
+      if (userData == null || ApiService.sessionToken.isEmpty) {
         setState(() => loading = false);
 
         snack(
           context,
-          'Login succeeded but user information was not returned.',
+          'Login succeeded but the server did not return a session.',
         );
 
         return;
@@ -1799,8 +1784,7 @@ class _LoginPageState extends State<LoginPage> {
 
       setState(() => loading = false);
 
-      // Staff o Admin na wala pang branch: pumili muna ng branch
-      // (ang Owner ay walang branch; nakikita niya lahat)
+      // Staff na wala pang branch: pumili muna ng branch
       if (found.role.trim().toLowerCase() == 'staff' &&
           (userData['branch']?.toString() ?? '').isEmpty) {
         final picked = await showDialog<String>(
@@ -1810,23 +1794,32 @@ class _LoginPageState extends State<LoginPage> {
         );
         if (!mounted) return;
         if (picked == null) {
+          await ApiService.logout();
+          if (!mounted) return;
           snack(context, 'Please choose your branch to continue.');
           return;
         }
+        found.branch = picked;
       }
 
       // Face recognition check bago makapasok sa account
       if (kRequireFace) {
         final faceOk = await _faceCheck(found.email);
         if (!mounted) return;
-        if (!faceOk) return;
+        if (!faceOk) {
+          await ApiService.logout();
+          return;
+        }
       }
 
       // PIN check pagkatapos ng face recognition
       if (kRequirePin) {
         final pinOk = await _pinCheck(found);
         if (!mounted) return;
-        if (!pinOk) return;
+        if (!pinOk) {
+          await ApiService.logout();
+          return;
+        }
       }
 
       widget.store.setSession(
@@ -1985,7 +1978,7 @@ class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  // Mag-request sa Admin/Owner na palitan ang password
+  // Forgot Password: code sa email
   void forgotPassword() {
     showDialog(
       context: context,
@@ -2319,14 +2312,14 @@ class _RegisterDialogState extends State<RegisterDialog> {
       return;
     }
 
-    // Staff: kailangang pumili ng Owner
+    // Staff/Admin: kailangang may Owner ID
     final needsOwner = !widget.privileged;
     if (needsOwner && ownerCode.text.trim().isEmpty) {
       snack(context, 'Please enter your Owner ID.');
       return;
     }
 
-    // Staff: kailangang pumili ng branch at ilagay ang password nito
+    // Staff/Admin: kailangang pumili ng branch at ilagay ang password nito
     if (needsOwner && selectedBranchId == null) {
       snack(context, 'Please choose your branch.');
       return;
@@ -2371,8 +2364,6 @@ class _RegisterDialogState extends State<RegisterDialog> {
         await widget.store.saveFace(e, faceVector);
         if (!mounted) return;
       }
-
-      // Staff: napili na ang branch sa form (hindi na kailangang pumili ulit)
 
       // Bagong Owner: ipakita ang unique Owner ID para ibigay sa staff
       final newCode = result['user']?['ownerCode']?.toString() ?? '';
@@ -2808,7 +2799,7 @@ class _PasswordPromptDialogState extends State<PasswordPromptDialog> {
   }
 }
 
-// Lalabas PAGKATAPOS gumawa ng account: pumili ng branch, tapos password
+// Staff na wala pang branch: pumili ng branch, tapos password ng branch
 class BranchPickDialog extends StatefulWidget {
   final int userId;
   const BranchPickDialog({super.key, required this.userId});
@@ -2962,7 +2953,7 @@ class _BranchPickDialogState extends State<BranchPickDialog> {
   }
 }
 
-// Admin / Owner: tingnan, dagdagan at palitan ang password ng mga branch
+// Owner: tingnan, dagdagan at palitan ang password ng mga branch
 class BranchesDialog extends StatefulWidget {
   final ReceiScanStore store;
   final String actorName;
@@ -3191,9 +3182,8 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   // Mga page na pwedeng buksan ng naka-login na user.
-  // Owner: Reports, Records, Logs, Profile (walang Scan).
-  // Admin: kapareho ng Owner PERO may Scan (sa branch niya mapupunta).
-  // Staff: may Scan at Records (sarili nilang scan), pero walang Reports at Logs.
+  // Owner: walang Scan. Admin: may Scan (sa branch niya mapupunta).
+  // Staff: Scan, Records, Attendance at Profile.
   List<int> _allowedPages() {
     if (isOwnerUser(widget.user)) {
       return [0, 2, if (canViewAttendance(widget.user)) 3, 4, 5, 6];
@@ -3498,13 +3488,11 @@ class _HomeShellState extends State<HomeShell> {
     // Bottom bar.
     // Owner: Home, Reports, Records, More (walang Scan)
     // Admin: Home, Records, Scan, Reports, More
-    // Staff: Home, Records, Scan, Attendance (kung may access), More
+    // Staff: Home, Records, Scan, Attendance, More
     final navPages = isOwnerUser(widget.user)
         ? <int>[0, 4, 2]
-        // Admin = Home, Records, Scan, Reports (Scan sa gitna)
         : isAdminUser(widget.user)
         ? <int>[0, 2, 1, 4]
-        // Staff = Home, Records, Scan, Attendance (kung may access)
         : <int>[0, 2, 1, if (canAttendance) 3];
     final moreNavIndex = navPages.length;
     final navSelected = navPages.contains(index)
@@ -3714,7 +3702,7 @@ class DashboardPage extends StatelessWidget {
     final isManager = isManagerUser(user);
     final name = _firstName();
 
-    // Branch ng naka-login (galing sa server; fallback sa huling scan)
+    // Branch ng naka-login (galing sa server)
     var myBranch = '';
     for (final u in store.getUsers()) {
       if (u.id == user.id) {
@@ -3778,8 +3766,7 @@ class DashboardPage extends StatelessWidget {
                       ),
                     ],
 
-                    // ---------- HEADER (Staff lang; sa Owner/Admin ay
-                    // kasama na sa Total Received card) ----------
+                    // ---------- HEADER (Staff lang) ----------
                     if (!isManager) ...[
                       Container(
                         padding: const EdgeInsets.all(16),
@@ -3830,33 +3817,31 @@ class DashboardPage extends StatelessWidget {
                                       color: Color(0xFF0B1B33),
                                     ),
                                   ),
-                                  if (!isManagerUser(user)) ...[
-                                    const SizedBox(height: 2),
-                                    Row(
-                                      children: [
-                                        const Icon(
-                                          Icons.store_outlined,
-                                          size: 15,
-                                          color: Color(0xFF0869EE),
-                                        ),
-                                        const SizedBox(width: 4),
-                                        Flexible(
-                                          child: Text(
-                                            myBranch.isEmpty
-                                                ? 'No branch yet'
-                                                : myBranch,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontSize: 13,
-                                              fontWeight: FontWeight.w700,
-                                              color: Color(0xFF0869EE),
-                                            ),
+                                  const SizedBox(height: 2),
+                                  Row(
+                                    children: [
+                                      const Icon(
+                                        Icons.store_outlined,
+                                        size: 15,
+                                        color: Color(0xFF0869EE),
+                                      ),
+                                      const SizedBox(width: 4),
+                                      Flexible(
+                                        child: Text(
+                                          myBranch.isEmpty
+                                              ? 'No branch yet'
+                                              : myBranch,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFF0869EE),
                                           ),
                                         ),
-                                      ],
-                                    ),
-                                  ],
+                                      ),
+                                    ],
+                                  ),
                                 ],
                               ),
                             ),
@@ -3886,7 +3871,6 @@ class DashboardPage extends StatelessWidget {
 
                     // ---------- HERO + STATS: Owner/Admin lang ----------
                     if (isManager) ...[
-                      // ---------- HERO: TOTAL RECEIVED ----------
                       Material(
                         borderRadius: BorderRadius.circular(26),
                         clipBehavior: Clip.antiAlias,
@@ -4058,8 +4042,6 @@ class DashboardPage extends StatelessWidget {
                       ),
                     ] else ...[
                       // ---------- STAFF: sarili nilang scan ----------
-
-                      // ---------- TOTAL RECEIVED (lalabas pag may scan na) ----------
                       if (txs.isNotEmpty) ...[
                         Material(
                           borderRadius: BorderRadius.circular(22),
@@ -4163,7 +4145,6 @@ class DashboardPage extends StatelessWidget {
                           ),
                         ],
                       ),
-                      // Owner: Branch Requests + Password Requests.
                       const SizedBox(height: 12),
                       Row(
                         children: [
@@ -4269,6 +4250,10 @@ class _MiniStat extends StatelessWidget {
   }
 }
 
+// -----------------------------------------------------------------------------
+// SCAN RECEIPT
+// -----------------------------------------------------------------------------
+
 class ScanPage extends StatefulWidget {
   final ReceiScanStore store;
   final UserAccount user;
@@ -4302,6 +4287,16 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   // GCash receipt ba ang na-scan? (GCash lang ang pwedeng i-save)
   bool isGcash = false;
+
+  // Mga field ng OCR Review. Nasa state na sila (hindi ginagawa ulit sa
+  // bawat build), kaya hindi na tumatalon ang cursor habang nagta-type.
+  final nameCtl = TextEditingController();
+  final senderCtl = TextEditingController();
+  final amountCtl = TextEditingController();
+  final refCtl = TextEditingController();
+
+  // Binabasa ng AI (Gemini) ang larawan
+  bool aiBusy = false;
 
   // Live camera
   cm.CameraController? controller;
@@ -4337,7 +4332,19 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     controller?.dispose();
+    nameCtl.dispose();
+    senderCtl.dispose();
+    amountCtl.dispose();
+    refCtl.dispose();
     super.dispose();
+  }
+
+  // Ilagay sa mga field ang kasalukuyang nabasa (OCR o AI)
+  void _fillControllers() {
+    nameCtl.text = accountName;
+    senderCtl.text = senderNumber;
+    amountCtl.text = amount;
+    refCtl.text = reference;
   }
 
   // Patayin ang camera pag umalis sa app, buksan ulit pag bumalik
@@ -4420,17 +4427,19 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
       final c = controller!;
       String? path;
+      var found = false;
       _capturing = true;
       try {
         final x = await c.takePicture();
         path = x.path;
-        final found = await _process(File(x.path), auto: true);
-        if (found) break; // may nakuha na, huminto na
+        found = await _process(File(x.path), auto: true);
       } catch (e) {
         debugPrint('AUTO SCAN ERROR: $e');
       } finally {
         _capturing = false;
       }
+
+      if (found) break; // may nakuha na, huminto na
 
       // Burahin ang litratong walang nabasa
       if (path != null) {
@@ -4447,8 +4456,6 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   // Pumili ng larawan sa gallery
   Future<void> pickFromGallery() async {
-    // Mataas ang quality para malinaw ang basa sa mga "*" ng pangalan, pero
-    // sapat ang laki para madaling i-upload ang larawan ng receipt.
     final x = await picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 92,
@@ -4471,6 +4478,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       time = '';
       isGcash = false;
       autoHint = 'Point the camera at a GCash receipt. It scans automatically.';
+      _fillControllers();
     });
     if (controller == null) {
       _initCamera();
@@ -4554,6 +4562,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         // Ang petsa at oras ay ang PAG-SCAN (ngayon), hindi ang nasa resibo
         date = dateKey(DateTime.now());
         time = timeNow();
+        _fillControllers();
       });
       return true;
     } catch (e) {
@@ -4565,11 +4574,54 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   }
 
   // ---------------------------------------------------------------
+  // READ WITH AI (Gemini, sa server)
+  // Pinupunan lang ang mga field na may nabasa ang AI. Kailangan pa ring
+  // tingnan ng staff bago i-save.
+  // ---------------------------------------------------------------
+  Future<void> readWithAi() async {
+    if (image == null || aiBusy) return;
+    setState(() => aiBusy = true);
+    try {
+      final bytes = await image!.readAsBytes();
+      if (bytes.length > 6 * 1024 * 1024) {
+        if (mounted) snack(context, 'The image is too large for AI reading.');
+        return;
+      }
+      final res = await ApiService.aiParseReceipt(
+        userId: widget.store.currentUserId,
+        imageBase64: base64Encode(bytes),
+      );
+      if (!mounted) return;
+      if (res['success'] != true) {
+        snack(context, res['message']?.toString() ?? 'AI could not read it.');
+        return;
+      }
+
+      String pick(Object? ai, String old) {
+        final v = (ai ?? '').toString().trim();
+        return v.isEmpty ? old : v;
+      }
+
+      setState(() {
+        accountName = pick(res['name'], accountName);
+        senderNumber = pick(res['senderNumber'], senderNumber);
+        amount = pick(res['amount'], amount);
+        reference = pick(res['reference'], reference);
+        isGcash = isGcash || res['isGcash'] == true;
+        _fillControllers();
+      });
+      snack(context, 'Read with AI. Please check the fields before saving.');
+    } catch (e) {
+      if (mounted) snack(context, errorText(e));
+    } finally {
+      if (mounted) setState(() => aiBusy = false);
+    }
+  }
+
+  // ---------------------------------------------------------------
   // ACCURACY NG SCAN (%)
-  // Sinusuri kung kumpleto at tama ang hugis ng bawat nabasa:
   //   Amount 25 • Reference (13 digits) 25 • Name 20 • Number 15 •
   //   Petsa/Oras ng pag-scan 15  = 100
-  // Tinatantiya ito mula sa mga field, hindi ito confidence ng OCR engine.
   // ---------------------------------------------------------------
   Widget _accuracyCard() {
     var score = 0;
@@ -4611,7 +4663,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       issues.add('Number');
     }
 
-    // Petsa at oras ng pag-scan: laging kumpleto (hindi na binabasa sa resibo)
+    // Petsa at oras ng pag-scan: laging kumpleto
     score += 15;
 
     final Color fg = score >= 90
@@ -4659,7 +4711,8 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                 Text(
                   issues.isEmpty
                       ? '100% - all fields were read correctly.'
-                      : 'Please check: ${issues.join(', ')}',
+                      : 'Please check: ${issues.join(', ')}. '
+                            'You can tap "Read with AI".',
                   style: TextStyle(color: fg, fontSize: 12),
                 ),
               ],
@@ -4692,9 +4745,6 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       return;
     }
 
-    // Ang server ang nagsusuri ng duplicate reference number at nagtatala
-    // ng bawat pagtatangka para makita sa Reports.
-
     // Larawan ng na-scan na receipt (para makita sa Transactions)
     var imageB64 = '';
     try {
@@ -4704,10 +4754,10 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       }
     } catch (_) {}
 
-    // I-save sa database (MySQL)
+    // I-save sa database (ang server ang huling tagasuri ng duplicate)
     try {
       final result = await ApiService.addTransaction(
-        userId: int.tryParse(widget.user.id) ?? 0,
+        userId: widget.store.currentUserId,
         customerName: accountName.trim(),
         // Petsa at oras ng pag-save ngayon (hindi ang nasa resibo)
         dateTime: toSqlDateTime(dateKey(DateTime.now()), timeNow()),
@@ -4718,13 +4768,11 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         rawText: ocrText,
         senderNumber: senderNumber.trim(),
         receiptImageBase64: imageB64,
-        // Ang server ang huling tagasuri ng duplicate reference number.
       );
 
       if (result['success'] != true) {
         final msg =
             result['message']?.toString() ?? 'Unable to save the transaction.';
-        // Ang server na ang nagtatala ng Duplicate Receipt sa Activity Logs
         if (!mounted) return;
         snack(context, msg);
         return;
@@ -4754,6 +4802,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
       amount = '';
       reference = '';
       isGcash = false;
+      _fillControllers();
     });
 
     // Ituloy ang auto-scan para sa susunod na receipt
@@ -4878,8 +4927,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    // Owner lang ang walang Scan. Ang Admin at Staff ay nag-i-scan, at ang
-    // scan ay mapupunta sa branch nila.
+    // Owner lang ang walang Scan. Ang Admin at Staff ay nag-i-scan.
     if (isOwnerUser(widget.user)) {
       return const PageFrame(
         title: 'Scan Receipt',
@@ -4942,7 +4990,9 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                             if (image != null) ...[
                               Expanded(
                                 child: FilledButton.icon(
-                                  onPressed: processing ? null : retake,
+                                  onPressed: (processing || aiBusy)
+                                      ? null
+                                      : retake,
                                   icon: const Icon(Icons.refresh),
                                   label: const Text('Retake'),
                                 ),
@@ -4955,7 +5005,9 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                                   foregroundColor: Colors.white,
                                   side: const BorderSide(color: Colors.white38),
                                 ),
-                                onPressed: processing ? null : pickFromGallery,
+                                onPressed: (processing || aiBusy)
+                                    ? null
+                                    : pickFromGallery,
                                 icon: const Icon(Icons.photo_library_outlined),
                                 label: const Text('Upload Image'),
                               ),
@@ -4972,21 +5024,17 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                       child: Column(
                         children: [
                           TextField(
-                            controller: TextEditingController(
-                              text: accountName,
-                            ),
-                            onChanged: (v) => accountName = v,
+                            controller: nameCtl,
+                            onChanged: (v) => setState(() => accountName = v),
                             decoration: const InputDecoration(
                               labelText: 'Account Name',
                             ),
                           ),
                           const SizedBox(height: 12),
                           TextField(
-                            controller: TextEditingController(
-                              text: senderNumber,
-                            ),
+                            controller: senderCtl,
                             keyboardType: TextInputType.phone,
-                            onChanged: (v) => senderNumber = v,
+                            onChanged: (v) => setState(() => senderNumber = v),
                             decoration: const InputDecoration(
                               labelText: 'Sender Number',
                               prefixIcon: Icon(Icons.phone_outlined),
@@ -4994,11 +5042,11 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                           ),
                           const SizedBox(height: 12),
                           TextField(
-                            controller: TextEditingController(text: amount),
+                            controller: amountCtl,
                             keyboardType: const TextInputType.numberWithOptions(
                               decimal: true,
                             ),
-                            onChanged: (v) => amount = v,
+                            onChanged: (v) => setState(() => amount = v),
                             decoration: const InputDecoration(
                               labelText: 'Amount',
                               prefixText: '₱ ',
@@ -5006,8 +5054,9 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                           ),
                           const SizedBox(height: 12),
                           TextField(
-                            controller: TextEditingController(text: reference),
-                            onChanged: (v) => reference = v,
+                            controller: refCtl,
+                            keyboardType: TextInputType.number,
+                            onChanged: (v) => setState(() => reference = v),
                             decoration: const InputDecoration(
                               labelText: 'Reference Number',
                             ),
@@ -5040,10 +5089,30 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                             ],
                           ),
                           const SizedBox(height: 18),
+                          // AI: basahin ulit ang larawan gamit ang Gemini
+                          SizedBox(
+                            width: double.infinity,
+                            child: OutlinedButton.icon(
+                              onPressed: aiBusy ? null : readWithAi,
+                              icon: aiBusy
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Icon(Icons.auto_awesome),
+                              label: Text(
+                                aiBusy ? 'Reading with AI...' : 'Read with AI',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
                           SizedBox(
                             width: double.infinity,
                             child: FilledButton.icon(
-                              onPressed: save,
+                              onPressed: aiBusy ? null : save,
                               icon: const Icon(Icons.check_circle_outline),
                               label: const Text('Confirm & Save Transaction'),
                             ),
@@ -5259,7 +5328,6 @@ class ReceiptParser {
     }
 
     // 3) Walang label/simbolo: pinakamadalas lumabas na halagang may sentimo
-    //    (hal. "Amount Sent" at "Total" ay parehong halaga)
     final counts = <String, int>{};
     final order = <String>[];
     for (final l in lines) {
@@ -5316,8 +5384,7 @@ class ReceiptParser {
 
   static final RegExp _maskChars = RegExp(r'[•·●○◦∙*°＊✱∗¤]');
 
-  // Mga simbolong madalas mabasa ng OCR sa halip na "*" (hindi ito
-  // bahagi ng totoong pangalan)
+  // Mga simbolong madalas mabasa ng OCR sa halip na "*"
   static final RegExp _strayMask = RegExp(r'[#+"^~`<>«»¢×=]');
 
   // Phone number na may mask: +63 9•• ••• 4597
@@ -5379,9 +5446,7 @@ class ReceiptParser {
 
     // Ang masked na pangalan ay malalaking letra (hal. MO***A R.).
     // Kung ang isang salita ay may 2 o higit pang malalaking letra at may
-    // maliliit na letra (hal. JOeN, BEeeeD), ang maliliit ay maling basa
-    // ng OCR sa "*". Gawing "*" ang bawat isa (isa-isa, hindi tinatanggal).
-    // Ang karaniwang pangalan (hal. Maria) ay hindi gagalawin.
+    // maliliit na letra (hal. JOeN), ang maliliit ay maling basa ng OCR sa "*".
     s = s
         .split(' ')
         .map((w) {
@@ -5417,15 +5482,12 @@ class ReceiptParser {
     }
     s = out.join(' ');
 
-    // Panghuling linis: letra, "*" at espasyo lang. Anumang ibang simbolo o
-    // numero sa loob ng salita ay maling basa ng OCR sa "*", kaya gawing
-    // "*". Ang tuldok ay iniiwan lang sa inisyal (hal. "R."). Ang salitang
-    // may "*" ay malalaking letra lang (ang maliliit ay maling basa).
+    // Panghuling linis: letra, "*" at espasyo lang. Ang tuldok ay iniiwan
+    // lang sa inisyal (hal. "R.").
     s = s
         .split(' ')
         .where((w) => w.isNotEmpty)
         .map((w) {
-          // Tuldok sa dulo ng salita (inisyal o "JR.") ay iniiwan
           final dot = w.endsWith('.') && w.length > 1;
           final core = dot ? w.substring(0, w.length - 1) : w;
           var x = core.replaceAll(RegExp(r'[^A-Za-z*]'), '*');
@@ -5441,19 +5503,16 @@ class ReceiptParser {
   }
 
   // ------------------------------------------------------------
-  // NUMBER NG SENDER (hal. +63 9** *** 4597 o 0917 123 4567)
-  // Kinokopya nang eksakto ang nasa receipt; ang bullet ay "*".
-  // ------------------------------------------------------------
-  // Number ng sender: buo (0917 123 4567) o may mask (+63 9** *** 4597).
+  // NUMBER NG SENDER: buo (0917 123 4567) o may mask (+63 9** *** 4597).
   // Tinatanggap ang letra/simbolo sa gitna dahil madalas mabasa ng OCR
   // ang bullet bilang "e", "o", "x", ".", atbp.
+  // ------------------------------------------------------------
   static final RegExp _phoneAny = RegExp(
     r'(?<![\d])(?:\+\s?63|63|0)\s?9[0-9A-Za-z*•·●○◦∙°＊✱∗¤.,#\s\-]{3,18}?\d{4}(?![\d])',
   );
 
   static String _tidyNumber(String raw) {
     // Digit at "*" lang. Anumang ibang simbolo/letra ay maling basa ng OCR
-    // sa bullet -> "*".
     var t = raw.trim().replaceAll(RegExp(r'[\s\-]+'), '');
     t = t.replaceAll(RegExp(r'[^0-9+]'), '*');
 
@@ -5610,8 +5669,7 @@ class ReceiptParser {
   }
 
   // Buuin ang text ayon sa HILERA (row) ng receipt gamit ang posisyon ng
-  // bawat linya. Para magkasama sa isang linya ang label at halaga, hal.
-  // "Ref No." at "7034 692 117384" (madalas silang pinaghihiwalay ng OCR).
+  // bawat linya, para magkasama ang label at halaga sa isang linya.
   static String rowsFrom(RecognizedText r) {
     final all = <TextLine>[];
     for (final b in r.blocks) {
@@ -5670,8 +5728,7 @@ class ReceiptParser {
   }
 
   // Linisin ang Raw OCR Text: ang linya ng pangalan at ng number ay gagawing
-  // kapareho ng nasa receipt (bullet/maling basa -> "*"). Ang ibang linya ay
-  // iiwan, bukod sa mga bullet na gagawing "*".
+  // kapareho ng nasa receipt (bullet/maling basa -> "*").
   static String cleanRaw(String text, ReceiptParserResult parsed) {
     final skip = RegExp(
       r'\bref|trace|transaction|invoice|amount|total|fee|balance',
@@ -5800,7 +5857,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
   final search = TextEditingController();
   String status = 'All';
   String period = 'All';
-  String branchFilter = 'All'; // Owner/Admin lang
+  String branchFilter = 'All'; // Owner lang
   bool selectMode = false;
   final selected = <String>{};
 
@@ -5817,7 +5874,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
     _loadBranchNames();
   }
 
-  // Lahat ng branch ng Owner (kahit wala pang scan) para sa Owner/Admin
+  // Lahat ng branch ng Owner (kahit wala pang scan)
   List<String> _allBranchNames = [];
 
   Future<void> _loadBranchNames() async {
@@ -5922,12 +5979,14 @@ class _TransactionsPageState extends State<TransactionsPage> {
     );
     if (!ok) return;
 
+    var failed = 0;
     try {
       for (final id in selected.toList()) {
-        await ApiService.deleteTransaction(
+        final res = await ApiService.deleteTransaction(
           userId: widget.store.currentUserId,
           transactionId: int.tryParse(id) ?? 0,
         );
+        if (res['success'] != true) failed++;
       }
     } catch (e) {
       if (!mounted) return;
@@ -5943,6 +6002,9 @@ class _TransactionsPageState extends State<TransactionsPage> {
     selectMode = false;
     if (!mounted) return;
     setState(() {});
+    if (failed > 0) {
+      snack(context, '$failed transaction(s) could not be deleted.');
+    }
   }
 
   Future<void> deleteAll() async {
@@ -5954,9 +6016,14 @@ class _TransactionsPageState extends State<TransactionsPage> {
     if (!ok) return;
 
     try {
-      await ApiService.deleteAllTransactions(
+      final res = await ApiService.deleteAllTransactions(
         userId: widget.store.currentUserId,
       );
+      if (res['success'] != true) {
+        if (!mounted) return;
+        snack(context, res['message']?.toString() ?? 'Nothing was deleted.');
+        return;
+      }
     } catch (e) {
       if (!mounted) return;
       snack(context, 'Unable to reach the server. Nothing was deleted.');
@@ -5993,8 +6060,6 @@ class _TransactionsPageState extends State<TransactionsPage> {
   }
 
   // Owner: lahat ng na-scan, nakapangkat kada BRANCH kung saan ito na-scan.
-  // Bawat branch ay may sariling bilang at kabuuan, at sa ilalim nito ang
-  // mga receipt na na-scan doon (pinakabago muna).
   Widget _branchGroups(
     List<TransactionRecord> all,
     List<TransactionRecord> filtered,
@@ -6096,7 +6161,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
     final all = widget.store.getTransactions();
     final q = search.text.toLowerCase();
 
-    // Mga branch na pagpipilian (Owner/Admin lang)
+    // Mga branch na pagpipilian (Owner lang)
     final branchOptions = <String>[
       'All',
       ...{..._allBranchNames, for (final t in all) _branchLabel(t)}.toList()
@@ -6121,8 +6186,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
       return matchesSearch && matchesStatus && matchesPeriod && matchesBranch;
     }).toList();
 
-    // Total Amount at bilang: HINDI apektado ng search. Sinusunod lang nito
-    // ang napiling Period at Branch, para hindi gumalaw habang nagse-search.
+    // Total Amount at bilang: HINDI apektado ng search.
     final summaryList = all.where((t) {
       final matchesStatus = status == 'All' || t.status == status.toLowerCase();
       final matchesPeriod = _inPeriod(t.scanDate);
@@ -6134,8 +6198,7 @@ class _TransactionsPageState extends State<TransactionsPage> {
     }).toList();
     final total = summaryList.fold<double>(0, (s, t) => s + t.amount);
 
-    // Owner/Admin: pindutin muna ang branch bago makita ang mga receipt
-    // Owner: lahat ng scan, nakapangkat kada branch. Admin/Staff: kada araw.
+    // Owner: nakapangkat kada branch. Admin/Staff: kada araw.
     final pickBranchFirst = isOwnerUser(widget.user) && branchFilter == 'All';
 
     // Igrupo kada araw
@@ -6289,7 +6352,6 @@ class _TransactionsPageState extends State<TransactionsPage> {
                       scrollDirection: Axis.horizontal,
                       child: Row(
                         children: [
-                          // Owner lang ang may pagpili ng branch
                           if (isOwnerUser(widget.user)) ...[
                             _FilterPill(
                               label: 'Branch',
@@ -6505,6 +6567,12 @@ class _FilterPill extends StatelessWidget {
   }
 }
 
+// -----------------------------------------------------------------------------
+// ATTENDANCE
+//   Owner/Admin: listahan ng Staff (Admin: branch niya lang) at pwedeng i-edit.
+//   Staff: sariling Clock In / Clock Out.
+// -----------------------------------------------------------------------------
+
 class AttendancePage extends StatefulWidget {
   final ReceiScanStore store;
   final UserAccount user;
@@ -6709,11 +6777,12 @@ class _AttendancePageState extends State<AttendancePage> {
   Widget build(BuildContext context) {
     if (!canViewAttendance(widget.user)) return _restricted();
 
-    final isOwner = widget.user.role == 'owner';
+    // Owner at Admin: listahan ng Staff. Staff: sariling attendance.
+    final isManager = isManagerUser(widget.user);
 
     return PageFrame(
       title: 'Attendance',
-      subtitle: isOwner
+      subtitle: isManager
           ? 'Tap a staff member to edit'
           : 'Your daily attendance',
       child: RefreshIndicator(
@@ -6725,7 +6794,7 @@ class _AttendancePageState extends State<AttendancePage> {
             Center(
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 900),
-                child: isOwner ? _managerView() : _staffView(),
+                child: isManager ? _managerView() : _staffView(),
               ),
             ),
           ],
@@ -6893,7 +6962,7 @@ class _AttendancePageState extends State<AttendancePage> {
   }
 
   // ---------------------------------------------------------------
-  // OWNER VIEW
+  // OWNER / ADMIN VIEW
   // ---------------------------------------------------------------
   Widget _managerView() {
     final staff = widget.store
@@ -6938,9 +7007,9 @@ class _AttendancePageState extends State<AttendancePage> {
           ),
         ),
         const SizedBox(height: 4),
-        Text(
+        const Text(
           'Tap a staff member to edit their attendance.',
-          style: const TextStyle(fontSize: 12.5, color: Color(0xFF6E86A4)),
+          style: TextStyle(fontSize: 12.5, color: Color(0xFF6E86A4)),
         ),
         const SizedBox(height: 14),
         Row(
@@ -7444,6 +7513,16 @@ class _AttendanceEditDialogState extends State<AttendanceEditDialog> {
     remarks = TextEditingController(text: e?.remarks ?? '');
   }
 
+  @override
+  void dispose() {
+    clockIn.dispose();
+    clockOut.dispose();
+    lateMinutes.dispose();
+    overtimeMinutes.dispose();
+    remarks.dispose();
+    super.dispose();
+  }
+
   void save() {
     final record = AttendanceRecord(
       email: '',
@@ -7543,7 +7622,7 @@ class _AttendanceEditDialogState extends State<AttendanceEditDialog> {
 }
 
 // -----------------------------------------------------------------------------
-// REPORTS
+// REPORTS (Owner: lahat ng branch. Admin: branch niya lang)
 // -----------------------------------------------------------------------------
 
 class ReportsPage extends StatefulWidget {
@@ -7557,16 +7636,13 @@ class ReportsPage extends StatefulWidget {
 class _ReportsPageState extends State<ReportsPage> {
   ReceiScanStore get store => widget.store;
 
-  // Branch ng naka-login na admin (galing sa server). Ang Owner ay
-  // walang branch; nakikita niya lahat.
+  // Branch ng naka-login na admin (galing sa server)
   String get _myBranch {
     for (final u in store.getUsers()) {
       if (u.id == store.currentUserId.toString() && u.branch.isNotEmpty) {
         return u.branch;
       }
     }
-    // Hindi na kinukuha sa mga scan: ang branch ng scan ay ang branch kung
-    // saan ito na-scan, hindi ang kasalukuyang branch ng account.
     return '';
   }
 
@@ -7637,7 +7713,7 @@ class _ReportsPageState extends State<ReportsPage> {
     String branchOf(TransactionRecord t) =>
         t.branch.trim().isEmpty ? 'No Branch' : t.branch.trim();
 
-    // Hanay ng mga branch: ang 3 kilala, iba pang may scan, at "No Branch"
+    // Hanay ng mga branch: mga branch ng Owner, iba pang may scan, at "No Branch"
     final extra = <String>{
       for (final t in txs)
         if (!_defaultBranches.contains(branchOf(t))) branchOf(t),
@@ -7910,8 +7986,7 @@ class _ReportsPageState extends State<ReportsPage> {
     );
   }
 
-  // Mga branch ng Owner (galing sa server). Dating hardcoded ang mga ito;
-  // bawat Owner ay may sariling mga branch na ngayon.
+  // Mga branch ng Owner (galing sa server)
   List<String> _branchNames = [];
 
   List<String> get _defaultBranches => _branchNames;
@@ -7930,19 +8005,14 @@ class _ReportsPageState extends State<ReportsPage> {
     try {
       final rows = await ApiService.getDuplicates(store.currentUserId);
       if (!mounted) return;
-      // I-filter ang mga lumang duplicate records; panatilihin ang bagong na-scan
-      final fresh = rows.where((r) {
-        final c = r['createdAt']?.toString() ?? '';
-        return c.compareTo('2026-10-24 02:44:00') >= 0;
-      }).toList();
-      setState(() => _dupRows = fresh);
+      // Lahat ng duplicate na ibinigay ng server (wala nang nakatagong luma)
+      setState(() => _dupRows = rows);
     } catch (e) {
       debugPrint('REPORT DUPLICATES ERROR: $e');
     }
   }
 
   // Duplicate Receipts: kada reference number, ilang beses sinubukan
-
   Widget _duplicatesCard() {
     const ink = Color(0xFF0B1B33);
     const sub = Color(0xFF2B3F5C);
@@ -8060,8 +8130,7 @@ class _ReportsPageState extends State<ReportsPage> {
     }
   }
 
-  // Igrupo ang mga transaction ng isang araw ayon sa BRANCH ng nag-scan.
-  // Lahat ng branch ay ipinapakita (kahit walang scan) para malinaw.
+  // Igrupo ang mga transaction ng isang araw ayon sa BRANCH kung saan na-scan
   List<Widget> _branchSections(
     BuildContext context,
     List<TransactionRecord> dayList,
@@ -8072,8 +8141,6 @@ class _ReportsPageState extends State<ReportsPage> {
       byBranch.putIfAbsent(b, () => []).add(t);
     }
 
-    // Una ang mga kilalang branch, kasunod ang iba pang may scan,
-    // at "No Branch" sa dulo (kung may laman).
     final names = store.isOwner
         ? <String>[
             ..._defaultBranches,
@@ -8148,8 +8215,6 @@ class _ReportsPageState extends State<ReportsPage> {
 
   @override
   Widget build(BuildContext context) {
-    // Owner: Reports ng lahat ng branch. Admin: Reports ng branch niya lang
-    // (ang server ang nagsasala ng data).
     if (!store.canSeeReceipts) {
       return const PageFrame(
         title: 'Reports',
@@ -8163,7 +8228,7 @@ class _ReportsPageState extends State<ReportsPage> {
     String branchOf(TransactionRecord t) =>
         t.branch.trim().isEmpty ? 'No Branch' : t.branch.trim();
 
-    // Mga pagpipilian: ang 3 branch + anumang iba pang may scan
+    // Mga pagpipilian: mga branch ng Owner + anumang iba pang may scan
     final branchChoices = <String>[
       'All',
       if (store.isOwner) ..._defaultBranches,
@@ -8181,9 +8246,7 @@ class _ReportsPageState extends State<ReportsPage> {
     final todayKey = dateKey(DateTime.now());
     final byDate = <String, List<TransactionRecord>>{};
     for (final t in summaryTxs) {
-      final key = t.scanDate.isEmpty
-          ? 'No date'
-          : t.scanDate; // araw ng pag-scan
+      final key = t.scanDate.isEmpty ? 'No date' : t.scanDate;
       byDate.putIfAbsent(key, () => []).add(t);
     }
     final summaryDates = byDate.keys.toList()..sort((a, b) => b.compareTo(a));
@@ -8191,127 +8254,136 @@ class _ReportsPageState extends State<ReportsPage> {
     return PageFrame(
       title: 'Reports',
       subtitle: 'Transaction and receipt summary',
-      child: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 16, 14, 40),
-        children: [
-          _overviewCard(txs),
-          const SizedBox(height: 24),
-          _duplicatesCard(),
-          const SizedBox(height: 24),
-          SectionCard(
-            title: 'Daily Transaction Summary',
-            padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // ---------- PILI NG BRANCH (Owner lang) ----------
-                if (store.isOwner)
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        for (final b in branchChoices)
-                          Padding(
-                            padding: const EdgeInsets.only(right: 8),
-                            child: ChoiceChip(
-                              avatar: Icon(
-                                b == 'All'
-                                    ? Icons.apps_rounded
-                                    : Icons.store_outlined,
-                                size: 16,
+      child: RefreshIndicator(
+        onRefresh: () async {
+          await store.syncTransactions();
+          await _loadDuplicates();
+          if (!mounted) return;
+          setState(() {});
+        },
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(14, 16, 14, 40),
+          children: [
+            _overviewCard(txs),
+            const SizedBox(height: 24),
+            _duplicatesCard(),
+            const SizedBox(height: 24),
+            SectionCard(
+              title: 'Daily Transaction Summary',
+              padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // ---------- PILI NG BRANCH (Owner lang) ----------
+                  if (store.isOwner)
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final b in branchChoices)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 8),
+                              child: ChoiceChip(
+                                avatar: Icon(
+                                  b == 'All'
+                                      ? Icons.apps_rounded
+                                      : Icons.store_outlined,
+                                  size: 16,
+                                ),
+                                label: Text(b),
+                                selected: selectedBranch == b,
+                                showCheckmark: false,
+                                onSelected: (_) =>
+                                    setState(() => selectedBranch = b),
                               ),
-                              label: Text(b),
-                              selected: selectedBranch == b,
-                              showCheckmark: false,
-                              onSelected: (_) =>
-                                  setState(() => selectedBranch = b),
                             ),
-                          ),
-                      ],
-                    ),
-                  ),
-                if (selectedBranch != 'All') ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEAF5FF),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      '$selectedBranch: ${summaryTxs.length} transaction(s) • '
-                      '₱${money(summaryTxs.fold<double>(0, (s, t) => s + t.amount))}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF0869D8),
+                        ],
                       ),
                     ),
-                  ),
-                ],
-                const SizedBox(height: 8),
-                summaryDates.isEmpty
-                    ? EmptyState(
-                        text: selectedBranch == 'All'
-                            ? 'No transactions yet.'
-                            : 'No scans yet for $selectedBranch.',
-                      )
-                    : Column(
-                        children: summaryDates.map((day) {
-                          final list = byDate[day]!;
-                          final dayTotal = list.fold<double>(
-                            0,
-                            (s, t) => s + t.amount,
-                          );
-                          final todayText = day == todayKey ? ' (Today)' : '';
+                  if (selectedBranch != 'All') ...[
+                    const SizedBox(height: 10),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFEAF5FF),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '$selectedBranch: ${summaryTxs.length} transaction(s) • '
+                        '₱${money(summaryTxs.fold<double>(0, (s, t) => s + t.amount))}',
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF0869D8),
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  summaryDates.isEmpty
+                      ? EmptyState(
+                          text: selectedBranch == 'All'
+                              ? 'No transactions yet.'
+                              : 'No scans yet for $selectedBranch.',
+                        )
+                      : Column(
+                          children: summaryDates.map((day) {
+                            final list = byDate[day]!;
+                            final dayTotal = list.fold<double>(
+                              0,
+                              (s, t) => s + t.amount,
+                            );
+                            final todayText = day == todayKey ? ' (Today)' : '';
 
-                          return ExpansionTile(
-                            shape: const Border(),
-                            collapsedShape: const Border(),
-                            tilePadding: EdgeInsets.zero,
-                            initiallyExpanded: day == todayKey,
-                            title: Text(
-                              '$day$todayText',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
+                            return ExpansionTile(
+                              shape: const Border(),
+                              collapsedShape: const Border(),
+                              tilePadding: EdgeInsets.zero,
+                              initiallyExpanded: day == todayKey,
+                              title: Text(
+                                '$day$todayText',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                ),
                               ),
-                            ),
-                            subtitle: Text(
-                              '${list.length} transaction(s)',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            trailing: Text(
-                              '₱${money(dayTotal)}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
-                                color: Color(0xFF07976F),
+                              subtitle: Text(
+                                '${list.length} transaction(s)',
+                                style: const TextStyle(fontSize: 12),
                               ),
-                            ),
-                            children: selectedBranch == 'All'
-                                ? _branchSections(context, list)
-                                : list
-                                      .map(
-                                        (t) => GestureDetector(
-                                          behavior: HitTestBehavior.opaque,
-                                          onTap: () => showTransactionDetail(
-                                            context,
-                                            store.currentUserId,
-                                            t,
+                              trailing: Text(
+                                '₱${money(dayTotal)}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  color: Color(0xFF07976F),
+                                ),
+                              ),
+                              children: selectedBranch == 'All'
+                                  ? _branchSections(context, list)
+                                  : list
+                                        .map(
+                                          (t) => GestureDetector(
+                                            behavior: HitTestBehavior.opaque,
+                                            onTap: () => showTransactionDetail(
+                                              context,
+                                              store.currentUserId,
+                                              t,
+                                            ),
+                                            child: TransactionTile(
+                                              t,
+                                              showScanner: true,
+                                            ),
                                           ),
-                                          child: TransactionTile(
-                                            t,
-                                            showScanner: true,
-                                          ),
-                                        ),
-                                      )
-                                      .toList(),
-                          );
-                        }).toList(),
-                      ),
-              ],
+                                        )
+                                        .toList(),
+                            );
+                          }).toList(),
+                        ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -8345,7 +8417,6 @@ class _LogsPageState extends State<LogsPage> {
   @override
   void initState() {
     super.initState();
-    // Kunin ang pinakabagong logs (login at scan ng lahat) pagbukas ng page
     _refresh();
   }
 
@@ -8913,7 +8984,7 @@ class _ProfilePageState extends State<ProfilePage> {
     if (isManagerUser(widget.user)) return;
     try {
       final res = await ApiService.getMyBranchRequest(
-        int.tryParse(widget.user.id) ?? 0,
+        widget.store.currentUserId,
       );
       // Para makita agad ang bagong branch kapag na-approve na
       await widget.store.refreshUsers();
@@ -8951,8 +9022,7 @@ class _ProfilePageState extends State<ProfilePage> {
       final picked = await showDialog<String>(
         context: context,
         barrierDismissible: false,
-        builder: (_) =>
-            BranchPickDialog(userId: int.tryParse(widget.user.id) ?? 0),
+        builder: (_) => BranchPickDialog(userId: widget.store.currentUserId),
       );
       if (picked != null) await _loadMyRequest();
       if (mounted) setState(() {});
@@ -9035,7 +9105,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
     try {
       final res = await ApiService.changePassword(
-        userId: int.tryParse(widget.user.id) ?? 0,
+        userId: widget.store.currentUserId,
         currentPassword: current.text,
         newPassword: next.text,
       );
@@ -9155,7 +9225,7 @@ class _ProfilePageState extends State<ProfilePage> {
     try {
       for (final t in oldTx) {
         final res = await ApiService.addTransaction(
-          userId: int.tryParse(widget.user.id) ?? 0,
+          userId: widget.store.currentUserId,
           customerName: t.accountName.isEmpty ? 'Unknown' : t.accountName,
           dateTime: toSqlDateTime(t.date, t.time),
           amount: t.amount,
@@ -9179,7 +9249,7 @@ class _ProfilePageState extends State<ProfilePage> {
 
       for (final a in oldAtt) {
         final res = await ApiService.saveAttendance(
-          userId: int.tryParse(widget.user.id) ?? 0,
+          userId: widget.store.currentUserId,
           email: a.email,
           date: a.date,
           status: a.status,
@@ -9303,7 +9373,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                 ),
                 Text(widget.user.email),
-                if (isManagerUser(widget.user) &&
+                if (isOwnerUser(widget.user) &&
                     widget.user.ownerCode.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 6),
@@ -9323,12 +9393,10 @@ class _ProfilePageState extends State<ProfilePage> {
                 const SizedBox(height: 8),
                 Chip(label: Text(formatRole(widget.user.role))),
                 const Divider(height: 30),
-                ListTile(
-                  leading: const Icon(Icons.dialpad),
-                  title: const Text('PIN'),
-                  subtitle: const Text(
-                    'Saved to your account - cannot be changed',
-                  ),
+                const ListTile(
+                  leading: Icon(Icons.dialpad),
+                  title: Text('PIN'),
+                  subtitle: Text('Saved to your account - cannot be changed'),
                 ),
                 if (widget.store.localOldTransactions().isNotEmpty ||
                     widget.store.localOldAttendance().isNotEmpty)
@@ -10138,8 +10206,6 @@ class _StaffAccountsPageState extends State<StaffAccountsPage> {
         ],
       ),
     );
-    pass1.dispose();
-    pass2.dispose();
     if (newPass == null || !mounted) return;
 
     try {
@@ -10465,7 +10531,7 @@ class _ChangeBranchDialogState extends State<ChangeBranchDialog> {
   bool loading = true;
   bool busy = false;
 
-  int get _uid => int.tryParse(widget.user.id) ?? 0;
+  int get _uid => widget.store.currentUserId;
 
   @override
   void initState() {
@@ -10989,12 +11055,6 @@ class EmptyState extends StatelessWidget {
 // HELPERS
 // -----------------------------------------------------------------------------
 
-// Mga account lang na ito ang may access sa Attendance
-const attendanceViewerEmails = {
-  'jackymasagnay@receiscan.com',
-  'cheeneloupatulot@receiscan.com',
-};
-
 // Owner at Admin: nakikita ang receipt/transaction at pwedeng magbura.
 //   Owner: lahat ng branch. Admin: branch niya lang (ang server ang nagsasala).
 // Staff: sarili lang nilang scan ang nakikita, view-only.
@@ -11009,8 +11069,10 @@ bool isOwnerUser(UserAccount u) => u.role.trim().toLowerCase() == 'owner';
 // Admin lang (may sariling branch)
 bool isAdminUser(UserAccount u) => u.role.trim().toLowerCase() == 'admin';
 
-bool canViewAttendance(UserAccount u) =>
-    attendanceViewerEmails.contains(u.email.trim().toLowerCase());
+// Attendance: para na sa lahat ng role (dati ay dalawang email lang).
+//   Owner: lahat ng Staff. Admin: Staff ng branch niya. Staff: sarili.
+// Ang server ang nagsasala kung kaninong attendance ang makikita.
+bool canViewAttendance(UserAccount u) => u.role.trim().isNotEmpty;
 
 // Gawing "YYYY-MM-DD HH:MM:00" (24-oras) para sa database
 String toSqlDateTime(String date, String time) {
