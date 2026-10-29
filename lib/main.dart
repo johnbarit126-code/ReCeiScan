@@ -16,6 +16,18 @@ import 'splash_page.dart';
 // Temporary debug line to trace userId, role, count and sum of transactions
 const bool kDebugLoad = false;
 
+// Ang hosting mismo ang humarang sa request (403 Forbidden ng openresty /
+// ModSecurity). Hindi ito error ng api.php o ng app.
+class BlockedByHostException implements Exception {
+  const BlockedByHostException();
+
+  @override
+  String toString() =>
+      'The hosting server blocked the request (403 Forbidden). '
+      'Please wait a few minutes and try again. If it keeps happening, '
+      'turn off ModSecurity in your hosting panel or contact your hosting support.';
+}
+
 class ApiService {
   // ============================================================
   // API BASE URL
@@ -89,6 +101,17 @@ class ApiService {
         'app_token': appToken,
       }).timeout(timeout);
 
+      // Hinarangan ng hosting (firewall / ModSecurity), hindi ng api.php
+      final blocked =
+          response.statusCode == 403 ||
+          response.statusCode == 406 ||
+          response.statusCode == 429 ||
+          (response.body.contains('403 Forbidden') &&
+              response.body.trimLeft().startsWith('<'));
+      if (blocked) {
+        throw const BlockedByHostException();
+      }
+
       if (response.statusCode != 200) {
         throw Exception(
           'Server returned HTTP ${response.statusCode} '
@@ -114,6 +137,9 @@ class ApiService {
       }
 
       return decoded;
+    } on BlockedByHostException {
+      debugPrint('API ERROR: blocked by hosting (403)');
+      rethrow;
     } catch (e) {
       debugPrint('API ERROR: $e');
       throw Exception('Unable to connect to server: $e');
@@ -123,14 +149,17 @@ class ApiService {
   // ============================================================
   // LOGIN (nagbabalik ng session token)
   // ============================================================
+  // loginAs: 'staff', 'admin' o 'owner' (dapat tugma sa role ng account)
   static Future<Map<String, dynamic>> login({
     required String email,
     required String password,
+    required String loginAs,
   }) async {
     return await _post({
       'action': 'login',
       'email': email,
       'password': password,
+      'login_as': loginAs,
     });
   }
 
@@ -283,19 +312,6 @@ class ApiService {
       'raw_text': rawText,
     }, timeout: const Duration(seconds: 90));
   }
-
-  // ============================================================
-  // AI PARSE RECEIPT (Gemini, sa server ang tawag)
-  // Ibinabalik: isGcash, name, senderNumber, amount, reference
-  // ============================================================
-  static Future<Map<String, dynamic>> aiParseReceipt({
-    required int userId,
-    required String imageBase64,
-  }) => _post({
-    'action': 'ai_parse_receipt',
-    'user_id': userId.toString(),
-    'receipt_image': imageBase64,
-  }, timeout: const Duration(seconds: 60));
 
   // Mga pagtatangkang mag-duplicate (Owner/Admin)
   static Future<List<Map<String, dynamic>>> getDuplicates(int userId) => _list(
@@ -1708,6 +1724,16 @@ class _LoginPageState extends State<LoginPage> {
   bool obscure = true;
   bool loading = false;
 
+  // Napiling login: 'staff', 'admin' o 'owner'.
+  // Ang account na may ibang role ay hindi makakapasok dito.
+  String loginRole = 'staff';
+
+  String get _roleLabel => loginRole == 'owner'
+      ? 'Owner'
+      : loginRole == 'admin'
+      ? 'Admin'
+      : 'Staff';
+
   @override
   void dispose() {
     email.dispose();
@@ -1727,7 +1753,11 @@ class _LoginPageState extends State<LoginPage> {
     setState(() => loading = true);
 
     try {
-      final result = await ApiService.login(email: e, password: p);
+      final result = await ApiService.login(
+        email: e,
+        password: p,
+        loginAs: loginRole,
+      );
 
       if (!mounted) return;
 
@@ -1774,6 +1804,22 @@ class _LoginPageState extends State<LoginPage> {
           'Login succeeded but the server did not return a session.',
         );
 
+        return;
+      }
+
+      // Dapat tugma ang role ng account sa napiling login
+      final accountRole = (userData['role']?.toString() ?? 'staff')
+          .trim()
+          .toLowerCase();
+      if (accountRole != loginRole) {
+        await ApiService.logout();
+        if (!mounted) return;
+        setState(() => loading = false);
+        snack(
+          context,
+          'This is not a $_roleLabel account. '
+          'Please use the ${formatRole(accountRole)} login.',
+        );
         return;
       }
 
@@ -1842,25 +1888,12 @@ class _LoginPageState extends State<LoginPage> {
         );
       }
 
-      // Kunin na ang mga receipt bago buksan ang Dashboard para hindi 0 ang Total
-      await widget.store.refreshAll();
-      if (!mounted) return;
-
-      if (kDebugLoad) {
-        final txs = widget.store.getTransactions();
-        final sum = txs.fold<double>(0, (s, t) => s + t.amount);
-        debugPrint(
-          '[ReceiScanLoad] Login end userId=${widget.store.currentUserId}, count=${txs.length}, total=$sum',
-        );
-      }
-
-      await widget.store.addLog(
-        'Login',
-        '${found.name} logged in.',
-        found.name,
+      // Papasok agad sa Dashboard. Ang data ay kinukuha ng HomeShell
+      // (may loading bar sa itaas habang naglo-load), at ang log ay
+      // ipinapadala sa likod para hindi na hintayin.
+      unawaited(
+        widget.store.addLog('Login', '${found.name} logged in.', found.name),
       );
-
-      if (!mounted) return;
 
       widget.onLogin(found);
     } catch (error) {
@@ -2047,27 +2080,68 @@ class _LoginPageState extends State<LoginPage> {
                             colors: [Color(0xFFEAF7FF), Colors.white],
                           ),
                         ),
-                        child: const Icon(
-                          Icons.receipt_long_rounded,
-                          color: Color(0xFF0869EE),
-                          size: 42,
+                        // Logo ng app (assets/logo.png). Kapag wala pa ang
+                        // file, ang dating icon ang lalabas.
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(22),
+                          child: Image.asset(
+                            'assets/logo.png',
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => const Icon(
+                              Icons.receipt_long_rounded,
+                              color: Color(0xFF0869EE),
+                              size: 42,
+                            ),
+                          ),
                         ),
                       ),
                       const SizedBox(height: 15),
-                      const Text(
-                        'Welcome Back',
-                        style: TextStyle(
+                      Text(
+                        '$_roleLabel Login',
+                        style: const TextStyle(
                           fontSize: 27,
                           fontWeight: FontWeight.w800,
                           color: Color(0xFF0A3974),
                         ),
                       ),
                       const SizedBox(height: 5),
-                      const Text(
-                        'Sign in to your ReceiScan account',
-                        style: TextStyle(color: Color(0xFF7890AA)),
+                      Text(
+                        'Sign in with your ${_roleLabel.toLowerCase()} account',
+                        style: const TextStyle(color: Color(0xFF7890AA)),
                       ),
-                      const SizedBox(height: 24),
+                      const SizedBox(height: 20),
+                      // Pili ng login: Staff / Admin / Owner
+                      SizedBox(
+                        width: double.infinity,
+                        child: SegmentedButton<String>(
+                          showSelectedIcon: false,
+                          segments: const [
+                            ButtonSegment(
+                              value: 'staff',
+                              icon: Icon(Icons.badge_outlined, size: 18),
+                              label: Text('Staff'),
+                            ),
+                            ButtonSegment(
+                              value: 'admin',
+                              icon: Icon(
+                                Icons.admin_panel_settings_outlined,
+                                size: 18,
+                              ),
+                              label: Text('Admin'),
+                            ),
+                            ButtonSegment(
+                              value: 'owner',
+                              icon: Icon(Icons.shield_outlined, size: 18),
+                              label: Text('Owner'),
+                            ),
+                          ],
+                          selected: {loginRole},
+                          onSelectionChanged: loading
+                              ? null
+                              : (v) => setState(() => loginRole = v.first),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
                       TextField(
                         controller: email,
                         keyboardType: TextInputType.emailAddress,
@@ -2115,7 +2189,7 @@ class _LoginPageState extends State<LoginPage> {
                                     color: Colors.white,
                                   ),
                                 )
-                              : const Text('Login'),
+                              : Text('Login as $_roleLabel'),
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -2301,7 +2375,8 @@ class _RegisterDialogState extends State<RegisterDialog> {
   }
 
   Future<void> create() async {
-    final n = name.text.trim();
+    // Isang espasyo lang sa pagitan ng mga salita
+    final n = name.text.trim().replaceAll(RegExp(r'\s+'), ' ');
     final e = email.text.trim().toLowerCase();
     final p = pass.text;
     final c = confirm.text;
@@ -2311,8 +2386,27 @@ class _RegisterDialogState extends State<RegisterDialog> {
       return;
     }
 
+    // Owner, Admin at Staff: bawal ang numero (0-9) at symbols sa pangalan
+    if (!isValidPersonName(n)) {
+      snack(
+        context,
+        'Name can only have letters and spaces. Numbers and symbols are not allowed.',
+      );
+      return;
+    }
+
     if (p.length < 6) {
       snack(context, 'Password must be at least 6 characters.');
+      return;
+    }
+
+    // Bawal ang 0, symbols at space sa password
+    if (!isValidNewPassword(p)) {
+      snack(
+        context,
+        'Password can only have letters and numbers 1-9. '
+        '0, symbols and spaces are not allowed.',
+      );
       return;
     }
 
@@ -2543,7 +2637,15 @@ class _RegisterDialogState extends State<RegisterDialog> {
             ],
             TextField(
               controller: name,
-              decoration: const InputDecoration(labelText: 'Full Name'),
+              textCapitalization: TextCapitalization.words,
+              // Letra at espasyo lang: bawal ang numero at symbols
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(kNameChars)),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Full Name',
+                helperText: 'Letters and spaces only',
+              ),
             ),
             const SizedBox(height: 10),
             TextField(
@@ -2555,12 +2657,24 @@ class _RegisterDialogState extends State<RegisterDialog> {
             TextField(
               controller: pass,
               obscureText: true,
-              decoration: const InputDecoration(labelText: 'Password'),
+              // Letra at 1-9 lang: bawal ang 0, symbols at space
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(kPasswordChars)),
+              ],
+              decoration: const InputDecoration(
+                labelText: 'Password',
+                helperText:
+                    'Letters and numbers 1-9 only. No 0, symbols or spaces.',
+                helperMaxLines: 2,
+              ),
             ),
             const SizedBox(height: 10),
             TextField(
               controller: confirm,
               obscureText: true,
+              inputFormatters: [
+                FilteringTextInputFormatter.allow(RegExp(kPasswordChars)),
+              ],
               decoration: const InputDecoration(labelText: 'Confirm Password'),
             ),
           ],
@@ -3168,6 +3282,9 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   int index = 0;
 
+  // true habang kinukuha ang unang data pagkatapos mag-login
+  bool _firstLoad = true;
+
   @override
   void initState() {
     super.initState();
@@ -3178,7 +3295,7 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _sync({bool showError = false}) async {
     final ok = await widget.store.refreshAll();
     if (!mounted) return;
-    setState(() {});
+    setState(() => _firstLoad = false);
     if (!ok && showError) {
       final err = widget.store.lastTransactionsError;
       snack(
@@ -3230,6 +3347,25 @@ class _HomeShellState extends State<HomeShell> {
     );
     if (!mounted) return;
     _sync();
+  }
+
+  // Manipis na loading bar sa itaas habang kinukuha ang unang data
+  Widget _withLoader(Widget page) {
+    return Stack(
+      children: [
+        Positioned.fill(child: page),
+        if (_firstLoad)
+          const Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              bottom: false,
+              child: LinearProgressIndicator(minHeight: 3),
+            ),
+          ),
+      ],
+    );
   }
 
   // Lumipat ng page at i-refresh ang data
@@ -3605,7 +3741,7 @@ class _HomeShellState extends State<HomeShell> {
                     ),
                   ]),
                 ),
-                Expanded(child: pages[index]),
+                Expanded(child: _withLoader(pages[index])),
               ],
             ),
           );
@@ -3617,7 +3753,7 @@ class _HomeShellState extends State<HomeShell> {
             backgroundColor: Colors.white,
             elevation: 0,
           ),
-          body: pages[index],
+          body: _withLoader(pages[index]),
           bottomNavigationBar: NavigationBar(
             selectedIndex: navSelected,
             onDestinationSelected: (v) {
@@ -3775,111 +3911,8 @@ class DashboardPage extends StatelessWidget {
                       ),
                     ],
 
-                    // ---------- HEADER (Staff lang) ----------
-                    if (!isManager) ...[
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(22),
-                          border: Border.all(color: const Color(0xFFD6E6FA)),
-                        ),
-                        child: Row(
-                          children: [
-                            CircleAvatar(
-                              radius: 28,
-                              backgroundColor: const Color(0xFFEAF5FF),
-                              backgroundImage: avatar == null
-                                  ? null
-                                  : MemoryImage(avatar),
-                              child: avatar == null
-                                  ? Text(
-                                      name.isEmpty ? '?' : name[0],
-                                      style: const TextStyle(
-                                        fontSize: 22,
-                                        fontWeight: FontWeight.w800,
-                                        color: Color(0xFF0869EE),
-                                      ),
-                                    )
-                                  : null,
-                            ),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    _greeting(),
-                                    style: const TextStyle(
-                                      fontSize: 14,
-                                      fontWeight: FontWeight.w700,
-                                      color: Color(0xFF2B3F5C),
-                                    ),
-                                  ),
-                                  Text(
-                                    name.isEmpty ? 'Welcome' : name,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(
-                                      fontSize: 22,
-                                      fontWeight: FontWeight.w800,
-                                      color: Color(0xFF0B1B33),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.store_outlined,
-                                        size: 15,
-                                        color: Color(0xFF0869EE),
-                                      ),
-                                      const SizedBox(width: 4),
-                                      Flexible(
-                                        child: Text(
-                                          myBranch.isEmpty
-                                              ? 'No branch yet'
-                                              : myBranch,
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(
-                                            fontSize: 13,
-                                            fontWeight: FontWeight.w700,
-                                            color: Color(0xFF0869EE),
-                                          ),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 12,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFEAF5FF),
-                                borderRadius: BorderRadius.circular(20),
-                              ),
-                              child: Text(
-                                formatRole(user.role),
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w800,
-                                  color: Color(0xFF0869EE),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 28),
-                    ],
-
-                    // ---------- HERO + STATS: Owner/Admin lang ----------
-                    if (isManager) ...[
+                    // ---------- HERO: pangalan + Total Received (lahat) ----------
+                    ...[
                       Material(
                         borderRadius: BorderRadius.circular(26),
                         clipBehavior: Clip.antiAlias,
@@ -3943,8 +3976,8 @@ class DashboardPage extends StatelessWidget {
                                               color: Colors.white,
                                             ),
                                           ),
-                                          // Admin: ipakita ang branch niya
-                                          if (isAdminUser(user))
+                                          // Admin at Staff: ipakita ang branch nila
+                                          if (!isOwnerUser(user))
                                             Text(
                                               myBranch.isEmpty
                                                   ? 'No branch yet'
@@ -4008,8 +4041,10 @@ class DashboardPage extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 14),
+                    ],
 
-                      // ---------- MGA STAT ----------
+                    // ---------- MGA STAT ----------
+                    if (isManager) ...[
                       Row(
                         children: [
                           Expanded(
@@ -4051,59 +4086,6 @@ class DashboardPage extends StatelessWidget {
                       ),
                     ] else ...[
                       // ---------- STAFF: sarili nilang scan ----------
-                      if (txs.isNotEmpty) ...[
-                        Material(
-                          borderRadius: BorderRadius.circular(22),
-                          clipBehavior: Clip.antiAlias,
-                          child: InkWell(
-                            onTap: onViewAll,
-                            child: Ink(
-                              width: double.infinity,
-                              padding: const EdgeInsets.fromLTRB(
-                                22,
-                                20,
-                                22,
-                                18,
-                              ),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF0869EE),
-                                borderRadius: BorderRadius.circular(22),
-                                border: Border.all(
-                                  color: const Color(0xFF0869EE),
-                                  width: 1.5,
-                                ),
-                              ),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  const Text(
-                                    'Total Received',
-                                    style: TextStyle(
-                                      color: Color(0xFFD6E6FA),
-                                      fontSize: 15,
-                                      fontWeight: FontWeight.w700,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 6),
-                                  FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    alignment: Alignment.centerLeft,
-                                    child: Text(
-                                      '₱${money(total)}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 34,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(height: 14),
-                      ],
                       Row(
                         children: [
                           Expanded(
@@ -4304,9 +4286,6 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   final amountCtl = TextEditingController();
   final refCtl = TextEditingController();
 
-  // Binabasa ng AI (Gemini) ang larawan
-  bool aiBusy = false;
-
   // Live camera
   cm.CameraController? controller;
   String? cameraError;
@@ -4348,7 +4327,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     super.dispose();
   }
 
-  // Ilagay sa mga field ang kasalukuyang nabasa (OCR o AI)
+  // Ilagay sa mga field ang kasalukuyang nabasa ng OCR
   void _fillControllers() {
     nameCtl.text = accountName;
     senderCtl.text = senderNumber;
@@ -4583,51 +4562,6 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
   }
 
   // ---------------------------------------------------------------
-  // READ WITH AI (Gemini, sa server)
-  // Pinupunan lang ang mga field na may nabasa ang AI. Kailangan pa ring
-  // tingnan ng staff bago i-save.
-  // ---------------------------------------------------------------
-  Future<void> readWithAi() async {
-    if (image == null || aiBusy) return;
-    setState(() => aiBusy = true);
-    try {
-      final bytes = await image!.readAsBytes();
-      if (bytes.length > 6 * 1024 * 1024) {
-        if (mounted) snack(context, 'The image is too large for AI reading.');
-        return;
-      }
-      final res = await ApiService.aiParseReceipt(
-        userId: widget.store.currentUserId,
-        imageBase64: base64Encode(bytes),
-      );
-      if (!mounted) return;
-      if (res['success'] != true) {
-        snack(context, res['message']?.toString() ?? 'AI could not read it.');
-        return;
-      }
-
-      String pick(Object? ai, String old) {
-        final v = (ai ?? '').toString().trim();
-        return v.isEmpty ? old : v;
-      }
-
-      setState(() {
-        accountName = pick(res['name'], accountName);
-        senderNumber = pick(res['senderNumber'], senderNumber);
-        amount = pick(res['amount'], amount);
-        reference = pick(res['reference'], reference);
-        isGcash = isGcash || res['isGcash'] == true;
-        _fillControllers();
-      });
-      snack(context, 'Read with AI. Please check the fields before saving.');
-    } catch (e) {
-      if (mounted) snack(context, errorText(e));
-    } finally {
-      if (mounted) setState(() => aiBusy = false);
-    }
-  }
-
-  // ---------------------------------------------------------------
   // ACCURACY NG SCAN (%)
   //   Amount 25 • Reference (13 digits) 25 • Name 20 • Number 15 •
   //   Petsa/Oras ng pag-scan 15  = 100
@@ -4721,7 +4655,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                   issues.isEmpty
                       ? '100% - all fields were read correctly.'
                       : 'Please check: ${issues.join(', ')}. '
-                            'You can tap "Read with AI".',
+                            'You can edit the fields or tap Retake.',
                   style: TextStyle(color: fg, fontSize: 12),
                 ),
               ],
@@ -4999,9 +4933,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                             if (image != null) ...[
                               Expanded(
                                 child: FilledButton.icon(
-                                  onPressed: (processing || aiBusy)
-                                      ? null
-                                      : retake,
+                                  onPressed: processing ? null : retake,
                                   icon: const Icon(Icons.refresh),
                                   label: const Text('Retake'),
                                 ),
@@ -5014,9 +4946,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                                   foregroundColor: Colors.white,
                                   side: const BorderSide(color: Colors.white38),
                                 ),
-                                onPressed: (processing || aiBusy)
-                                    ? null
-                                    : pickFromGallery,
+                                onPressed: processing ? null : pickFromGallery,
                                 icon: const Icon(Icons.photo_library_outlined),
                                 label: const Text('Upload Image'),
                               ),
@@ -5098,30 +5028,10 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                             ],
                           ),
                           const SizedBox(height: 18),
-                          // AI: basahin ulit ang larawan gamit ang Gemini
-                          SizedBox(
-                            width: double.infinity,
-                            child: OutlinedButton.icon(
-                              onPressed: aiBusy ? null : readWithAi,
-                              icon: aiBusy
-                                  ? const SizedBox(
-                                      width: 16,
-                                      height: 16,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Icon(Icons.auto_awesome),
-                              label: Text(
-                                aiBusy ? 'Reading with AI...' : 'Read with AI',
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 10),
                           SizedBox(
                             width: double.infinity,
                             child: FilledButton.icon(
-                              onPressed: aiBusy ? null : save,
+                              onPressed: save,
                               icon: const Icon(Icons.check_circle_outline),
                               label: const Text('Confirm & Save Transaction'),
                             ),
@@ -7780,6 +7690,77 @@ class _ReportsPageState extends State<ReportsPage> {
   // Pinindot na bar sa chart (null = pinakabago)
   String? _selectedBar;
 
+  // Para sa pagpindot ng KPI card: lilipat ang screen sa tamang bahagi
+  final _chartKey = GlobalKey();
+  final _dupKey = GlobalKey();
+  final _summaryKey = GlobalKey();
+  final _dayKey = GlobalKey();
+
+  // Bahaging naka-highlight saglit ('chart', 'dup', 'summary', 'day')
+  String? _flash;
+
+  // Araw na bubuksan sa Daily Transaction Summary
+  String? _openDay;
+
+  // Lumipat sa isang bahagi ng Reports at i-highlight ito saglit
+  Future<void> _goTo(GlobalKey key, String name) async {
+    setState(() => _flash = name);
+    await WidgetsBinding.instance.endOfFrame;
+    final ctx = key.currentContext;
+    if (ctx == null || !ctx.mounted) return;
+    await Scrollable.ensureVisible(
+      ctx,
+      duration: const Duration(milliseconds: 500),
+      curve: Curves.easeInOutCubic,
+      alignment: 0.04,
+    );
+    Future.delayed(const Duration(milliseconds: 1400), () {
+      if (mounted && _flash == name) setState(() => _flash = null);
+    });
+  }
+
+  // Lalagyan ng isang bahagi: may asul na guhit kapag ito ang pinuntahan
+  Widget _spot(GlobalKey key, String name, Widget child) {
+    final on = _flash == name;
+    return AnimatedContainer(
+      key: key,
+      duration: const Duration(milliseconds: 300),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: on
+            ? [BoxShadow(color: _blue.withValues(alpha: .45), spreadRadius: 3)]
+            : const [],
+      ),
+      child: child,
+    );
+  }
+
+  // Receipts -> Daily Transaction Summary
+  void _tapReceipts() => _goTo(_summaryKey, 'summary');
+
+  // Average per receipt -> Income chart
+  void _tapAverage() => _goTo(_chartKey, 'chart');
+
+  // Best day -> bubuksan ang araw na iyon (Monthly/Yearly: sa chart)
+  void _tapBest(String bucket) {
+    setState(() => _selectedBar = bucket);
+    if (overviewMode == 'Daily') {
+      setState(() {
+        selectedBranch = 'All';
+        _openDay = bucket;
+      });
+      _goTo(_dayKey, 'day');
+    } else {
+      _goTo(_chartKey, 'chart');
+    }
+  }
+
+  // Duplicate attempts -> Duplicate Receipts at bubuksan ang listahan
+  Future<void> _tapDuplicates() async {
+    await _goTo(_dupKey, 'dup');
+    if (mounted && _dupRows.isNotEmpty) _openDuplicates();
+  }
+
   // Mga branch ng Owner (galing sa server)
   List<String> _branchNames = [];
 
@@ -8215,13 +8196,24 @@ class _ReportsPageState extends State<ReportsPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                padding: const EdgeInsets.all(7),
-                decoration: BoxDecoration(
-                  color: color.withValues(alpha: .10),
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: Icon(icon, size: 19, color: color),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: .10),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: Icon(icon, size: 19, color: color),
+                  ),
+                  const Spacer(),
+                  if (onTap != null)
+                    const Icon(
+                      Icons.arrow_outward_rounded,
+                      size: 16,
+                      color: _sub,
+                    ),
+                ],
               ),
               const SizedBox(height: 12),
               FittedBox(
@@ -9012,11 +9004,16 @@ class _ReportsPageState extends State<ReportsPage> {
                   final dayTotal = list.fold<double>(0, (s, t) => s + t.amount);
                   final isToday = day == todayKey;
 
-                  return ExpansionTile(
+                  final isTarget = day == _openDay;
+
+                  final tile = ExpansionTile(
+                    // Nagbabago ang key kapag ito ang pinuntahan para bumukas
+                    key: ValueKey('day-$day-${isTarget ? 'open' : 'auto'}'),
                     shape: const Border(),
                     collapsedShape: const Border(),
                     tilePadding: EdgeInsets.zero,
-                    initiallyExpanded: isToday,
+                    initiallyExpanded:
+                        isTarget || (_openDay == null && isToday),
                     leading: Container(
                       width: 40,
                       height: 40,
@@ -9061,6 +9058,9 @@ class _ReportsPageState extends State<ReportsPage> {
                               )
                               .toList(),
                   );
+
+                  if (!isTarget) return tile;
+                  return _spot(_dayKey, 'day', tile);
                 },
               ),
         ],
@@ -9161,6 +9161,7 @@ class _ReportsPageState extends State<ReportsPage> {
                         label: 'Receipts',
                         value: '$rangeCount',
                         note: _rangeText,
+                        onTap: _tapReceipts,
                       ),
                       _kpiCard(
                         icon: Icons.functions_rounded,
@@ -9168,6 +9169,7 @@ class _ReportsPageState extends State<ReportsPage> {
                         label: 'Average per receipt',
                         value: '₱${money(avg)}',
                         note: 'Total ÷ receipts',
+                        onTap: _tapAverage,
                       ),
                       _kpiCard(
                         icon: Icons.emoji_events_outlined,
@@ -9185,7 +9187,7 @@ class _ReportsPageState extends State<ReportsPage> {
                             : _bucketLabel(bestBucket),
                         onTap: bestBucket == null
                             ? null
-                            : () => setState(() => _selectedBar = bestBucket),
+                            : () => _tapBest(bestBucket),
                       ),
                       _kpiCard(
                         icon: Icons.content_copy_rounded,
@@ -9195,10 +9197,11 @@ class _ReportsPageState extends State<ReportsPage> {
                         note: biggest == null
                             ? _rangeText
                             : 'Biggest: ₱${money(biggest.amount)}',
+                        onTap: _tapDuplicates,
                       ),
                     ]),
                     const SizedBox(height: 14),
-                    _chartCard(keys, byBucket),
+                    _spot(_chartKey, 'chart', _chartCard(keys, byBucket)),
                     const SizedBox(height: 14),
                     LayoutBuilder(
                       builder: (context, c) {
@@ -9225,9 +9228,9 @@ class _ReportsPageState extends State<ReportsPage> {
                       },
                     ),
                     const SizedBox(height: 14),
-                    _duplicatesCard(),
+                    _spot(_dupKey, 'dup', _duplicatesCard()),
                     const SizedBox(height: 14),
-                    _dailySummaryCard(txs),
+                    _spot(_summaryKey, 'summary', _dailySummaryCard(txs)),
                   ],
                 ),
               ),
@@ -11919,10 +11922,26 @@ bool isOwnerUser(UserAccount u) => u.role.trim().toLowerCase() == 'owner';
 // Admin lang (may sariling branch)
 bool isAdminUser(UserAccount u) => u.role.trim().toLowerCase() == 'admin';
 
-// Attendance: para na sa lahat ng role (dati ay dalawang email lang).
-//   Owner: lahat ng Staff. Admin: Staff ng branch niya. Staff: sarili.
+// Pangalan ng tao (Owner, Admin, Staff): letra at espasyo lang.
+// Kasama ang ñ at may tuldik (é, á). Bawal ang numero at symbols.
+const String kNameChars = r'[A-Za-zÀ-ÖØ-öø-ÿ ]';
+
+bool isValidPersonName(String name) {
+  final n = name.trim();
+  if (n.length < 2) return false;
+  return RegExp(r'^[A-Za-zÀ-ÖØ-öø-ÿ]+( [A-Za-zÀ-ÖØ-öø-ÿ]+)*$').hasMatch(n);
+}
+
+// Password ng bagong account: letra (A-Z, a-z) at 1-9 lang.
+// Bawal ang 0, symbols at space.
+const String kPasswordChars = r'[A-Za-z1-9]';
+
+bool isValidNewPassword(String p) => RegExp(r'^[A-Za-z1-9]+$').hasMatch(p);
+
+// Attendance: Owner at Admin lang. Wala na ito sa Staff.
+//   Owner: lahat ng Staff. Admin: Staff ng branch niya.
 // Ang server ang nagsasala kung kaninong attendance ang makikita.
-bool canViewAttendance(UserAccount u) => u.role.trim().isNotEmpty;
+bool canViewAttendance(UserAccount u) => isManagerUser(u);
 
 // Gawing "YYYY-MM-DD HH:MM:00" (24-oras) para sa database
 String toSqlDateTime(String date, String time) {

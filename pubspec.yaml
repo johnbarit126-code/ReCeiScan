@@ -21,9 +21,23 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  # Gumagawa ng icon ng app mula sa assets/logo.png
+  flutter_launcher_icons: ^0.14.1
 
 flutter:
   uses-material-design: true
 
   assets:
     - assets/splash.jpg
+    - assets/logo.png
+
+# Icon ng app sa home screen ng phone
+# Patakbuhin: dart run flutter_launcher_icons
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/logo.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#FFFFFF"
+  adaptive_icon_foreground: "assets/logo.png"
+  remove_alpha_ios: true
