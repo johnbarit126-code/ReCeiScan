@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -149,6 +150,35 @@ class ApiService {
   // ============================================================
   // LOGIN (nagbabalik ng session token)
   // ============================================================
+  // ID ng phone na ito (random, naka-save sa phone). Ginagamit para
+  // isang device lang ang naka-login kada account.
+  static String _deviceId = '';
+
+  static Future<String> deviceId() async {
+    if (_deviceId.isNotEmpty) return _deviceId;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      var id = prefs.getString('receiscan_device_id') ?? '';
+      if (id.length < 16) {
+        final r = Random.secure();
+        id = List.generate(
+          16,
+          (_) => r.nextInt(256),
+        ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+        await prefs.setString('receiscan_device_id', id);
+      }
+      _deviceId = id;
+    } catch (_) {
+      // Kapag hindi ma-save, gumawa ng pansamantala (para sa session na ito)
+      final r = Random.secure();
+      _deviceId = List.generate(
+        16,
+        (_) => r.nextInt(256),
+      ).map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    }
+    return _deviceId;
+  }
+
   // loginAs: 'staff', 'admin' o 'owner' (dapat tugma sa role ng account)
   static Future<Map<String, dynamic>> login({
     required String email,
@@ -160,7 +190,16 @@ class ApiService {
       'email': email,
       'password': password,
       'login_as': loginAs,
+      'device_id': await deviceId(),
     });
+  }
+
+  // "Buhay pa ang app": para malaman ng server na aktibo pa ang session
+  static Future<void> ping() async {
+    if (sessionToken.isEmpty) return;
+    try {
+      await _post({'action': 'ping'}, timeout: const Duration(seconds: 15));
+    } catch (_) {}
   }
 
   // LOGOUT: burahin ang session sa server at sa phone
@@ -326,11 +365,15 @@ class ApiService {
   static Future<Map<String, dynamic>> getReceiptImage({
     required int userId,
     required String transactionId,
+    String referenceNo = '',
   }) async {
     return await _post({
       'action': 'get_receipt_image',
       'user_id': userId.toString(),
-      'transaction_id': transactionId,
+      // Kapag hindi numero ang id (lumang record), 0 ang ipapadala
+      'transaction_id': (int.tryParse(transactionId) ?? 0).toString(),
+      // Ang Reference No. ang pangunahing panghanap ng tamang resibo
+      'reference_no': referenceNo,
     }, timeout: const Duration(seconds: 60));
   }
 
@@ -1374,6 +1417,7 @@ class ReceiScanStore {
     currentUserId = userId;
     currentRole = role;
     lastTransactionsError = null;
+    offline = false;
     _txs = [];
     _users = [];
     _logs = [];
@@ -1589,9 +1633,12 @@ class ReceiScanStore {
       lastTransactionsError = txError;
     }
 
+    // Hindi na kailangan ng Staff ang attendance (Owner/Admin lang)
+    final needsAttendance = currentRole == 'owner' || currentRole == 'admin';
+
     await Future.wait([
       safe(refreshUsers, 'users'),
-      safe(refreshAttendance, 'attendance'),
+      if (needsAttendance) safe(refreshAttendance, 'attendance'),
       safe(refreshLogs, 'logs'),
       safe(refreshBranchRequests, 'branch requests'),
       safe(refreshPasswordRequests, 'password requests'),
@@ -1601,7 +1648,10 @@ class ReceiScanStore {
       return false;
     }
 
-    offline = !allOk;
+    // "Server is unreachable" lang kapag hindi makuha ang transactions.
+    // Ang pagpalya ng ibang listahan (logs, attendance, atbp.) ay hindi
+    // ibig sabihing walang internet.
+    offline = txError != null;
     return allOk;
   }
 
@@ -1668,6 +1718,7 @@ class ReceiScanStore {
     _branchRequests = [];
     _pwRequests = [];
     lastTransactionsError = null;
+    offline = false;
   }
 
   // ---------------------------------------------------------------
@@ -1733,6 +1784,84 @@ class _LoginPageState extends State<LoginPage> {
       : loginRole == 'admin'
       ? 'Admin'
       : 'Staff';
+
+  // Tatlong pindutan na magkakasinlaki. Lumiliit ang text kapag masikip
+  // ang screen, at nawawala ang icon sa napakaliit na phone.
+  Widget _roleSelector() {
+    const options = [
+      ('staff', 'Staff', Icons.badge_outlined),
+      ('admin', 'Admin', Icons.admin_panel_settings_outlined),
+      ('owner', 'Owner', Icons.shield_outlined),
+    ];
+    const blue = Color(0xFF0869EE);
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        final showIcon = c.maxWidth >= 280;
+        return Container(
+          height: 48,
+          padding: const EdgeInsets.all(4),
+          decoration: BoxDecoration(
+            color: const Color(0xFFEFF4FB),
+            borderRadius: BorderRadius.circular(26),
+            border: Border.all(color: const Color(0xFFD6E2F2)),
+          ),
+          child: Row(
+            children: [
+              for (final o in options)
+                Expanded(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: loading
+                        ? null
+                        : () => setState(() => loginRole = o.$1),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      decoration: BoxDecoration(
+                        color: loginRole == o.$1 ? blue : Colors.transparent,
+                        borderRadius: BorderRadius.circular(22),
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (showIcon) ...[
+                              Icon(
+                                o.$3,
+                                size: 17,
+                                color: loginRole == o.$1
+                                    ? Colors.white
+                                    : const Color(0xFF4A5E7A),
+                              ),
+                              const SizedBox(width: 5),
+                            ],
+                            Text(
+                              o.$2,
+                              maxLines: 1,
+                              softWrap: false,
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                                color: loginRole == o.$1
+                                    ? Colors.white
+                                    : const Color(0xFF4A5E7A),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
 
   @override
   void dispose() {
@@ -2080,19 +2209,10 @@ class _LoginPageState extends State<LoginPage> {
                             colors: [Color(0xFFEAF7FF), Colors.white],
                           ),
                         ),
-                        // Logo ng app (assets/logo.png). Kapag wala pa ang
-                        // file, ang dating icon ang lalabas.
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(22),
-                          child: Image.asset(
-                            'assets/logo.png',
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => const Icon(
-                              Icons.receipt_long_rounded,
-                              color: Color(0xFF0869EE),
-                              size: 42,
-                            ),
-                          ),
+                        child: const Icon(
+                          Icons.receipt_long_rounded,
+                          color: Color(0xFF0869EE),
+                          size: 42,
                         ),
                       ),
                       const SizedBox(height: 15),
@@ -2111,36 +2231,8 @@ class _LoginPageState extends State<LoginPage> {
                       ),
                       const SizedBox(height: 20),
                       // Pili ng login: Staff / Admin / Owner
-                      SizedBox(
-                        width: double.infinity,
-                        child: SegmentedButton<String>(
-                          showSelectedIcon: false,
-                          segments: const [
-                            ButtonSegment(
-                              value: 'staff',
-                              icon: Icon(Icons.badge_outlined, size: 18),
-                              label: Text('Staff'),
-                            ),
-                            ButtonSegment(
-                              value: 'admin',
-                              icon: Icon(
-                                Icons.admin_panel_settings_outlined,
-                                size: 18,
-                              ),
-                              label: Text('Admin'),
-                            ),
-                            ButtonSegment(
-                              value: 'owner',
-                              icon: Icon(Icons.shield_outlined, size: 18),
-                              label: Text('Owner'),
-                            ),
-                          ],
-                          selected: {loginRole},
-                          onSelectionChanged: loading
-                              ? null
-                              : (v) => setState(() => loginRole = v.first),
-                        ),
-                      ),
+                      // (hindi lumalagpas ang text kahit maliit ang phone)
+                      _roleSelector(),
                       const SizedBox(height: 18),
                       TextField(
                         controller: email,
@@ -3285,10 +3377,24 @@ class _HomeShellState extends State<HomeShell> {
   // true habang kinukuha ang unang data pagkatapos mag-login
   bool _firstLoad = true;
 
+  // Kada 20 segundo, sinasabi sa server na bukas pa ang app (isang device
+  // lang). Dapat mas madalas ito kaysa sa 1 minutong palugit sa server.
+  Timer? _heartbeat;
+
   @override
   void initState() {
     super.initState();
     _sync(showError: widget.store.getTransactions().isEmpty);
+    _heartbeat = Timer.periodic(
+      const Duration(seconds: 20),
+      (_) => ApiService.ping(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _heartbeat?.cancel();
+    super.dispose();
   }
 
   // Kunin ang pinakabagong data mula sa database
@@ -3916,127 +4022,126 @@ class DashboardPage extends StatelessWidget {
                       Material(
                         borderRadius: BorderRadius.circular(26),
                         clipBehavior: Clip.antiAlias,
-                        child: InkWell(
-                          onTap: onViewAll,
-                          child: Ink(
-                            width: double.infinity,
-                            padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
-                            decoration: BoxDecoration(
+                        // Hindi na napipindot ang Total Received card
+                        // (Staff, Admin at Owner)
+                        child: Ink(
+                          width: double.infinity,
+                          padding: const EdgeInsets.fromLTRB(24, 24, 24, 24),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0869EE),
+                            borderRadius: BorderRadius.circular(26),
+                            border: Border.all(
                               color: const Color(0xFF0869EE),
-                              borderRadius: BorderRadius.circular(26),
-                              border: Border.all(
-                                color: const Color(0xFF0869EE),
-                                width: 1.5,
-                              ),
+                              width: 1.5,
                             ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                // ---------- PANGALAN + ROLE ----------
-                                Row(
-                                  children: [
-                                    CircleAvatar(
-                                      radius: 24,
-                                      backgroundColor: Colors.white24,
-                                      backgroundImage: avatar == null
-                                          ? null
-                                          : MemoryImage(avatar),
-                                      child: avatar == null
-                                          ? Text(
-                                              name.isEmpty ? '?' : name[0],
-                                              style: const TextStyle(
-                                                fontSize: 20,
-                                                fontWeight: FontWeight.w800,
-                                                color: Colors.white,
-                                              ),
-                                            )
-                                          : null,
-                                    ),
-                                    const SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // ---------- PANGALAN + ROLE ----------
+                              Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 24,
+                                    backgroundColor: Colors.white24,
+                                    backgroundImage: avatar == null
+                                        ? null
+                                        : MemoryImage(avatar),
+                                    child: avatar == null
+                                        ? Text(
+                                            name.isEmpty ? '?' : name[0],
+                                            style: const TextStyle(
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.w800,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        : null,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          _greeting(),
+                                          style: const TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                            color: Color(0xFFD6E6FA),
+                                          ),
+                                        ),
+                                        Text(
+                                          name.isEmpty ? 'Welcome' : name,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 20,
+                                            fontWeight: FontWeight.w800,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                        // Admin at Staff: ipakita ang branch nila
+                                        if (!isOwnerUser(user))
                                           Text(
-                                            _greeting(),
+                                            myBranch.isEmpty
+                                                ? 'No branch yet'
+                                                : myBranch,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
                                             style: const TextStyle(
                                               fontSize: 13,
                                               fontWeight: FontWeight.w700,
                                               color: Color(0xFFD6E6FA),
                                             ),
                                           ),
-                                          Text(
-                                            name.isEmpty ? 'Welcome' : name,
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: const TextStyle(
-                                              fontSize: 20,
-                                              fontWeight: FontWeight.w800,
-                                              color: Colors.white,
-                                            ),
-                                          ),
-                                          // Admin at Staff: ipakita ang branch nila
-                                          if (!isOwnerUser(user))
-                                            Text(
-                                              myBranch.isEmpty
-                                                  ? 'No branch yet'
-                                                  : myBranch,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: const TextStyle(
-                                                fontSize: 13,
-                                                fontWeight: FontWeight.w700,
-                                                color: Color(0xFFD6E6FA),
-                                              ),
-                                            ),
-                                        ],
-                                      ),
-                                    ),
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 12,
-                                        vertical: 6,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: Colors.white24,
-                                        borderRadius: BorderRadius.circular(20),
-                                      ),
-                                      child: Text(
-                                        formatRole(user.role),
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          fontWeight: FontWeight.w800,
-                                          color: Colors.white,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                                const SizedBox(height: 18),
-                                const Text(
-                                  'Total Received',
-                                  style: TextStyle(
-                                    color: Color(0xFFD6E6FA),
-                                    fontSize: 15,
-                                    fontWeight: FontWeight.w700,
-                                  ),
-                                ),
-                                const SizedBox(height: 10),
-                                FittedBox(
-                                  fit: BoxFit.scaleDown,
-                                  alignment: Alignment.centerLeft,
-                                  child: Text(
-                                    '₱${money(total)}',
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 40,
-                                      fontWeight: FontWeight.w800,
+                                      ],
                                     ),
                                   ),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 12,
+                                      vertical: 6,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white24,
+                                      borderRadius: BorderRadius.circular(20),
+                                    ),
+                                    child: Text(
+                                      formatRole(user.role),
+                                      style: const TextStyle(
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 18),
+                              const Text(
+                                'Total Received',
+                                style: TextStyle(
+                                  color: Color(0xFFD6E6FA),
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
                                 ),
-                              ],
-                            ),
+                              ),
+                              const SizedBox(height: 10),
+                              FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  '₱${money(total)}',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 40,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
@@ -4095,7 +4200,7 @@ class DashboardPage extends StatelessWidget {
                               icon: Icons.receipt_long_outlined,
                               color: Colors.white,
                               foreground: const Color(0xFF0869EE),
-                              onTap: onViewAll,
+                              // Hindi na napipindot (Staff)
                             ),
                           ),
                           const SizedBox(width: 12),
@@ -4698,11 +4803,13 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     } catch (_) {}
 
     // I-save sa database (ang server ang huling tagasuri ng duplicate)
+    var savedAt = '';
     try {
       final result = await ApiService.addTransaction(
         userId: widget.store.currentUserId,
         customerName: accountName.trim(),
-        // Petsa at oras ng pag-save ngayon (hindi ang nasa resibo)
+        // Ipinapadala pa rin, pero ang SERVER ang nagtatakda ng petsa at
+        // oras (Philippine time), kaya hindi ito mababago ng oras ng phone
         dateTime: toSqlDateTime(dateKey(DateTime.now()), timeNow()),
         amount: parsedAmount,
         referenceNo: reference.trim(),
@@ -4720,6 +4827,7 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
         snack(context, msg);
         return;
       }
+      savedAt = result['savedAt']?.toString() ?? '';
     } catch (e) {
       if (!mounted) return;
       snack(context, 'Unable to reach the server. The receipt was not saved.');
@@ -4734,7 +4842,12 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
     );
 
     if (!mounted) return;
-    snack(context, 'Transaction saved successfully.');
+    snack(
+      context,
+      savedAt.isEmpty
+          ? 'Transaction saved successfully.'
+          : 'Transaction saved successfully on $savedAt (PH time).',
+    );
     widget.onSaved();
 
     setState(() {
@@ -5001,31 +5114,37 @@ class _ScanPageState extends State<ScanPage> with WidgetsBindingObserver {
                             ),
                           ),
                           const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Expanded(
-                                // Hindi mababago: petsa ng pag-scan
-                                child: TextField(
-                                  controller: TextEditingController(text: date),
-                                  readOnly: true,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Date Scanned',
-                                    prefixIcon: Icon(Icons.event_outlined),
+                          // Petsa at oras: ang server ang nagtatakda (PH time)
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF1F6FD),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: const Color(0xFFD6E6FA),
+                              ),
+                            ),
+                            child: const Row(
+                              children: [
+                                Icon(
+                                  Icons.schedule_outlined,
+                                  color: Color(0xFF0869EE),
+                                ),
+                                SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    'Date and time will be recorded in Philippine '
+                                    'time when you save. Changing the phone\'s '
+                                    'clock will not affect it.',
+                                    style: TextStyle(
+                                      fontSize: 12.5,
+                                      color: Color(0xFF2B3F5C),
+                                    ),
                                   ),
                                 ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: TextField(
-                                  controller: TextEditingController(text: time),
-                                  readOnly: true,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Time Scanned',
-                                    prefixIcon: Icon(Icons.schedule_outlined),
-                                  ),
-                                ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
                           const SizedBox(height: 18),
                           SizedBox(
@@ -10600,6 +10719,7 @@ class _TransactionDetailDialogState extends State<_TransactionDetailDialog> {
       final res = await ApiService.getReceiptImage(
         userId: widget.userId,
         transactionId: widget.tx.id,
+        referenceNo: widget.tx.reference,
       );
       if (!mounted) return;
       if (res['success'] == true && res['image'] != null) {
@@ -10802,13 +10922,28 @@ class TransactionTile extends StatelessWidget {
                   color: Color(0xFF07976F),
                 ),
               ),
+              // May larawan: ipakitang napipindot para makita ang resibo
               if (tx.hasImage)
                 const Padding(
                   padding: EdgeInsets.only(top: 4),
-                  child: Icon(
-                    Icons.image_outlined,
-                    size: 16,
-                    color: Color(0xFF0869EE),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.image_outlined,
+                        size: 15,
+                        color: Color(0xFF0869EE),
+                      ),
+                      SizedBox(width: 3),
+                      Text(
+                        'View receipt',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF0869EE),
+                        ),
+                      ),
+                    ],
                   ),
                 ),
             ],

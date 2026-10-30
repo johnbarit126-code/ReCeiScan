@@ -29,7 +29,6 @@ flutter:
 
   assets:
     - assets/splash.jpg
-    - assets/logo.png
 
 # Icon ng app sa home screen ng phone
 # Patakbuhin: dart run flutter_launcher_icons
